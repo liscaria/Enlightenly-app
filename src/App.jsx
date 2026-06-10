@@ -110,10 +110,6 @@ function previewFileShape(record) {
   };
 }
 
-function questionBankPapersStorageKey(ownerId) {
-  return ownerId ? `questionBankPapers:${ownerId}` : "questionBankPapers";
-}
-
 function emptyQuestionPaperDraft() {
   return {
     step: "choose",
@@ -354,7 +350,35 @@ function catalogForStorage(catalog) {
 }
 
 function teachingCatalogStorageKey(ownerId) {
-  return ownerId ? `teachingCatalog:${ownerId}` : "teachingCatalog";
+  if (!ownerId) throw new Error("teachingCatalogStorageKey requires ownerId");
+  return `teachingCatalog:${ownerId}`;
+}
+
+function questionBankPapersStorageKey(ownerId) {
+  if (!ownerId) throw new Error("questionBankPapersStorageKey requires ownerId");
+  return `questionBankPapers:${ownerId}`;
+}
+
+/** Move pre-auth localStorage into the signed-in user's namespace. */
+function migrateUnscopedStorageToUser(ownerId) {
+  if (!ownerId) return;
+  const catalogKey = teachingCatalogStorageKey(ownerId);
+  const papersKey = questionBankPapersStorageKey(ownerId);
+  if (!window.localStorage.getItem(catalogKey)) {
+    const legacyCatalog = window.localStorage.getItem("teachingCatalog");
+    if (legacyCatalog) {
+      window.localStorage.setItem(catalogKey, legacyCatalog);
+    }
+  }
+  if (!window.localStorage.getItem(papersKey)) {
+    const legacyPapers = window.localStorage.getItem("questionBankPapers");
+    if (legacyPapers) {
+      window.localStorage.setItem(papersKey, legacyPapers);
+    }
+  }
+  window.localStorage.removeItem("teachingCatalog");
+  window.localStorage.removeItem("questionBankPapers");
+  window.sessionStorage.removeItem("authMethod");
 }
 
 function loadTeachingCatalog(storageKey) {
@@ -4039,7 +4063,7 @@ function SignInPage({
             Create an account
           </button>
         ) : (
-          <a href="#">Request an invite</a>
+          <span>Configure Supabase to create an account.</span>
         )}
       </p>
       <p className="footer-copy">© Enlightly · Crafted for educators</p>
@@ -4051,16 +4075,11 @@ export default function App() {
   const [path, setPath] = useState(window.location.pathname);
   const [session, setSession] = useState(null);
   const [authReady, setAuthReady] = useState(false);
-  const [legacyAuth, setLegacyAuth] = useState(() =>
-    isSupabaseConfigured ? false : Boolean(window.sessionStorage.getItem("authMethod"))
-  );
   const [authError, setAuthError] = useState(null);
   const [authSuccess, setAuthSuccess] = useState(null);
   const [authBusy, setAuthBusy] = useState(false);
 
-  const isAuthenticated = isSupabaseConfigured
-    ? Boolean(session?.user)
-    : legacyAuth;
+  const isAuthenticated = Boolean(session?.user);
 
   useEffect(() => {
     const onPathChange = () => setPath(window.location.pathname);
@@ -4076,12 +4095,16 @@ export default function App() {
     let alive = true;
     supabase.auth.getSession().then(({ data: { session: s } }) => {
       if (!alive) return;
+      if (s?.user?.id) migrateUnscopedStorageToUser(s.user.id);
       setSession(s);
       setAuthReady(true);
     });
     const {
       data: { subscription },
-    } = supabase.auth.onAuthStateChange((_event, s) => {
+    } = supabase.auth.onAuthStateChange((event, s) => {
+      if (s?.user?.id && (event === "SIGNED_IN" || event === "INITIAL_SESSION")) {
+        migrateUnscopedStorageToUser(s.user.id);
+      }
       setSession(s);
       setAuthReady(true);
     });
@@ -4101,9 +4124,9 @@ export default function App() {
       return;
     }
     if (!supabase) {
-      setLegacyAuth(true);
-      window.sessionStorage.setItem("authMethod", "password");
-      navigateTo("/dashboard");
+      setAuthError(
+        "Cloud sign-in is not configured. Set VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY."
+      );
       return;
     }
     setAuthBusy(true);
@@ -4185,8 +4208,6 @@ export default function App() {
       await supabase.auth.signOut();
     }
     setSession(null);
-    setLegacyAuth(false);
-    window.sessionStorage.removeItem("authMethod");
     navigateTo("/");
   };
 
@@ -4218,7 +4239,11 @@ export default function App() {
   }
 
   if (path === "/materials") {
-    return <MaterialsPage onSignOut={handleSignOut} ownerId={session?.user?.id ?? null} />;
+    if (!session?.user?.id) {
+      navigateTo("/");
+      return null;
+    }
+    return <MaterialsPage onSignOut={handleSignOut} ownerId={session.user.id} />;
   }
   if (path === "/dashboard" || path === "/") {
     return <DashboardPage onSignOut={handleSignOut} />;

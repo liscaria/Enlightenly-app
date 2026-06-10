@@ -60,9 +60,13 @@ you are signed in (RLS policies require the `authenticated` role).
 ### Email + password
 
 1. In Supabase: **Authentication** → **Providers** → ensure **Email** is enabled.
-2. For development you can disable **Confirm email** under Email settings so
-   sign-up works immediately without clicking a link.
-3. In the app: use **Create account**, then **Sign in** with the same email/password.
+2. Keep **Allow new users to sign up** **on** so teachers can use **Create account** in the app.
+3. For development you can disable **Confirm email** under Email settings so sign-up works
+   immediately without clicking a link.
+4. In the app: **Create account**, then **Sign in** with the same email/password.
+
+Each user only sees their own classes, materials, and question bank (`owner_id` = their user id).
+Run `db/supabase/policies.sql` so Row Level Security enforces this in Postgres.
 
 Or create a user manually: **Authentication** → **Users** → **Add user**.
 
