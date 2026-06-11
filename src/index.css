@@ -1,9 +1,12 @@
 :root {
-  font-family: Inter, system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+  font-family: "Circular Pro", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+    "Helvetica Neue", Arial, sans-serif;
   line-height: 1.5;
   font-weight: 400;
-  color: #061b35;
-  background-color: #f4f0e8;
+  font-size: 16px;
+  color: #252a31;
+  background-color: #f5f7f9;
+  -webkit-font-smoothing: antialiased;
 }
 
 * {
@@ -12,5 +15,12 @@
 
 body {
   margin: 0;
-  background: #f4f0e8;
+  background: #f5f7f9;
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
 }

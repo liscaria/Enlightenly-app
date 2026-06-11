@@ -5,6 +5,7 @@ import {
   librarySaveBlob,
   libraryGet,
   libraryDelete,
+  setLibraryOwnerId,
   fetchDriveLinkAsBlob,
   isTextEditableMaterial,
   materialsSave,
@@ -125,212 +126,71 @@ function emptyQuestionPaperDraft() {
 const MATERIAL_LOCAL_FILE_ACCEPT =
   "image/*,.pdf,.doc,.docx,.gdoc,application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document,text/*";
 
-const SEEDED_CATALOG = [
-  {
-    id: "class-xi",
-    name: "Class XI",
-    units: [
-      {
-        id: "unit-1",
-        name: "Unit-I",
-        title: "Physical World and Measurement",
-        marks: 23,
-        chapters: [{ id: "chapter-1", name: "Chapter-1: Units and Measurements", files: [] }],
-      },
-      {
-        id: "unit-2",
-        name: "Unit-II",
-        title: "Kinematics",
-        marks: 23,
-        chapters: [
-          { id: "chapter-2", name: "Chapter-2: Motion in a Straight Line", files: [] },
-          { id: "chapter-3", name: "Chapter-3: Motion in a Plane", files: [] },
-        ],
-      },
-      {
-        id: "unit-3",
-        name: "Unit-III",
-        title: "Laws of Motion",
-        marks: 23,
-        chapters: [{ id: "chapter-4", name: "Chapter-4: Laws of Motion", files: [] }],
-      },
-      {
-        id: "unit-4",
-        name: "Unit-IV",
-        title: "Work, Energy and Power",
-        marks: 17,
-        chapters: [{ id: "chapter-5", name: "Chapter-5: Work, Energy and Power", files: [] }],
-      },
-      {
-        id: "unit-5",
-        name: "Unit-V",
-        title: "Motion of System of Particles and Rigid Body",
-        marks: 17,
-        chapters: [
-          {
-            id: "chapter-6",
-            name: "Chapter-6: System of Particles and Rotational Motion",
-            files: [],
-          },
-        ],
-      },
-      {
-        id: "unit-6",
-        name: "Unit-VI",
-        title: "Gravitation",
-        marks: 17,
-        chapters: [{ id: "chapter-7", name: "Chapter-7: Gravitation", files: [] }],
-      },
-      {
-        id: "unit-7",
-        name: "Unit-VII",
-        title: "Properties of Bulk Matter",
-        marks: 20,
-        chapters: [
-          { id: "chapter-8", name: "Chapter-8: Mechanical Properties of Solids", files: [] },
-          { id: "chapter-9", name: "Chapter-9: Mechanical Properties of Fluids", files: [] },
-          { id: "chapter-10", name: "Chapter-10: Thermal Properties of Matter", files: [] },
-        ],
-      },
-      {
-        id: "unit-8",
-        name: "Unit-VIII",
-        title: "Thermodynamics",
-        marks: 20,
-        chapters: [{ id: "chapter-11", name: "Chapter-11: Thermodynamics", files: [] }],
-      },
-      {
-        id: "unit-9",
-        name: "Unit-IX",
-        title: "Behaviour of Perfect Gases and Kinetic Theory of Gases",
-        marks: 20,
-        chapters: [{ id: "chapter-12", name: "Chapter-12: Kinetic Theory", files: [] }],
-      },
-      {
-        id: "unit-10",
-        name: "Unit-X",
-        title: "Oscillations and Waves",
-        marks: 10,
-        chapters: [
-          { id: "chapter-13", name: "Chapter-13: Oscillations", files: [] },
-          { id: "chapter-14", name: "Chapter-14: Waves", files: [] },
-        ],
-      },
-    ],
-  },
-  {
-    id: "class-xii",
-    name: "Class XII",
-    units: [
-      {
-        id: "xii-unit-1",
-        name: "Unit-I",
-        title: "Electrostatics",
-        marks: 16,
-        chapters: [
-          { id: "xii-chapter-1", name: "Chapter-1: Electric Charges and Fields", files: [] },
-          {
-            id: "xii-chapter-2",
-            name: "Chapter-2: Electrostatic Potential and Capacitance",
-            files: [],
-          },
-        ],
-      },
-      {
-        id: "xii-unit-2",
-        name: "Unit-II",
-        title: "Current Electricity",
-        marks: "",
-        chapters: [
-          { id: "xii-chapter-3", name: "Chapter-3: Current Electricity", files: [] },
-        ],
-      },
-      {
-        id: "xii-unit-3",
-        name: "Unit-III",
-        title: "Magnetic Effects of Current and Magnetism",
-        marks: 17,
-        chapters: [
-          { id: "xii-chapter-4", name: "Chapter-4: Moving Charges and Magnetism", files: [] },
-          { id: "xii-chapter-5", name: "Chapter-5: Magnetism and Matter", files: [] },
-        ],
-      },
-      {
-        id: "xii-unit-4",
-        name: "Unit-IV",
-        title: "Electromagnetic Induction and Alternating Currents",
-        marks: "",
-        chapters: [
-          { id: "xii-chapter-6", name: "Chapter-6: Electromagnetic Induction", files: [] },
-          { id: "xii-chapter-7", name: "Chapter-7: Alternating Current", files: [] },
-        ],
-      },
-      {
-        id: "xii-unit-5",
-        name: "Unit-V",
-        title: "Electromagnetic Waves",
-        marks: 18,
-        chapters: [
-          { id: "xii-chapter-8", name: "Chapter-8: Electromagnetic Waves", files: [] },
-        ],
-      },
-      {
-        id: "xii-unit-6",
-        name: "Unit-VI",
-        title: "Optics",
-        marks: "",
-        chapters: [
-          {
-            id: "xii-chapter-9",
-            name: "Chapter-9: Ray Optics and Optical Instruments",
-            files: [],
-          },
-          { id: "xii-chapter-10", name: "Chapter-10: Wave Optics", files: [] },
-        ],
-      },
-      {
-        id: "xii-unit-7",
-        name: "Unit-VII",
-        title: "Dual Nature of Radiation and Matter",
-        marks: 12,
-        chapters: [
-          {
-            id: "xii-chapter-11",
-            name: "Chapter-11: Dual Nature of Radiation and Matter",
-            files: [],
-          },
-        ],
-      },
-      {
-        id: "xii-unit-8",
-        name: "Unit-VIII",
-        title: "Atoms and Nuclei",
-        marks: "",
-        chapters: [
-          { id: "xii-chapter-12", name: "Chapter-12: Atoms", files: [] },
-          { id: "xii-chapter-13", name: "Chapter-13: Nuclei", files: [] },
-        ],
-      },
-      {
-        id: "xii-unit-9",
-        name: "Unit-IX",
-        title: "Electronic Devices",
-        marks: 7,
-        chapters: [
-          {
-            id: "xii-chapter-14",
-            name: "Chapter-14: Semiconductor Electronics: Materials, Devices and Simple Circuits",
-            files: [],
-          },
-        ],
-      },
-    ],
-  },
-];
-
 function navigateTo(path) {
   window.history.pushState({}, "", path);
   window.dispatchEvent(new PopStateEvent("popstate"));
+}
+
+/** Display name from Supabase Auth (Google: user_metadata.full_name; email: local part). */
+function userDisplayName(user) {
+  if (!user) return null;
+  const meta = user.user_metadata ?? {};
+  const fromMeta = meta.full_name || meta.name || meta.display_name;
+  if (typeof fromMeta === "string" && fromMeta.trim()) {
+    return fromMeta.trim();
+  }
+  const email = user.email?.trim();
+  if (email) {
+    const local = email.split("@")[0] ?? "";
+    return local
+      .replace(/[._-]+/g, " ")
+      .replace(/\b\w/g, (c) => c.toUpperCase())
+      .trim();
+  }
+  return null;
+}
+
+function userFirstName(user) {
+  const full = userDisplayName(user);
+  if (!full) return "there";
+  return full.split(/\s+/)[0];
+}
+
+function userInitials(user) {
+  const full = userDisplayName(user);
+  if (!full) return "?";
+  const parts = full.split(/\s+/).filter(Boolean);
+  if (parts.length >= 2) {
+    return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase();
+  }
+  return parts[0].slice(0, 2).toUpperCase();
+}
+
+function userAvatarUrl(user) {
+  if (!user) return null;
+  const meta = user.user_metadata ?? {};
+  const url = meta.avatar_url || meta.picture;
+  return typeof url === "string" && url.startsWith("http") ? url : null;
+}
+
+function UserAvatarButton({ user, onClick, title }) {
+  const label = userDisplayName(user) || "Account";
+  const avatarUrl = userAvatarUrl(user);
+  return (
+    <button
+      className="avatar"
+      type="button"
+      onClick={onClick}
+      title={title ?? label}
+      aria-label={label}
+    >
+      {avatarUrl ? (
+        <img className="avatar-img" src={avatarUrl} alt="" referrerPolicy="no-referrer" />
+      ) : (
+        userInitials(user)
+      )}
+    </button>
+  );
 }
 
 function catalogForStorage(catalog) {
@@ -359,23 +219,8 @@ function questionBankPapersStorageKey(ownerId) {
   return `questionBankPapers:${ownerId}`;
 }
 
-/** Move pre-auth localStorage into the signed-in user's namespace. */
-function migrateUnscopedStorageToUser(ownerId) {
-  if (!ownerId) return;
-  const catalogKey = teachingCatalogStorageKey(ownerId);
-  const papersKey = questionBankPapersStorageKey(ownerId);
-  if (!window.localStorage.getItem(catalogKey)) {
-    const legacyCatalog = window.localStorage.getItem("teachingCatalog");
-    if (legacyCatalog) {
-      window.localStorage.setItem(catalogKey, legacyCatalog);
-    }
-  }
-  if (!window.localStorage.getItem(papersKey)) {
-    const legacyPapers = window.localStorage.getItem("questionBankPapers");
-    if (legacyPapers) {
-      window.localStorage.setItem(papersKey, legacyPapers);
-    }
-  }
+/** Drop pre–per-user localStorage keys so they are never copied to another account. */
+function clearLegacyUnscopedStorage() {
   window.localStorage.removeItem("teachingCatalog");
   window.localStorage.removeItem("questionBankPapers");
   window.sessionStorage.removeItem("authMethod");
@@ -383,19 +228,12 @@ function migrateUnscopedStorageToUser(ownerId) {
 
 function loadTeachingCatalog(storageKey) {
   const saved = window.localStorage.getItem(storageKey);
-  if (!saved) return SEEDED_CATALOG;
+  if (!saved) return [];
   try {
     const parsed = JSON.parse(saved);
-    if (!Array.isArray(parsed)) return SEEDED_CATALOG;
-    const merged = [...parsed];
-    for (const seedClass of SEEDED_CATALOG) {
-      if (!merged.some((c) => c?.id === seedClass.id)) {
-        merged.push(seedClass);
-      }
-    }
-    return merged;
+    return Array.isArray(parsed) ? parsed : [];
   } catch {
-    return SEEDED_CATALOG;
+    return [];
   }
 }
 
@@ -509,7 +347,7 @@ function buildCompiledHtmlDocument({ className, unitName, unitTitle, chapterName
 </html>`;
 }
 
-function DashboardPage({ onSignOut }) {
+function DashboardPage({ user, onSignOut }) {
   const actions = [
     {
       icon: "📖",
@@ -560,15 +398,13 @@ function DashboardPage({ onSignOut }) {
           <button className="signout-btn" type="button" onClick={onSignOut}>
             Sign out
           </button>
-          <button className="avatar" type="button">
-            LY
-          </button>
+          <UserAvatarButton user={user} />
         </div>
       </header>
 
       <section className="hero">
         <p className="eyebrow">VOL. 01 · THE TEACHER'S DESK</p>
-        <h1>Good morning, Layyoni. Three classes await today.</h1>
+        <h1>Good morning, {userFirstName(user)}. Three classes await today.</h1>
         <p className="subtext">
           You have 12 messages, 4 assignments to grade, and a parent meeting at 6:30 PM.
         </p>
@@ -622,7 +458,7 @@ function DashboardPage({ onSignOut }) {
   );
 }
 
-function MaterialsPage({ onSignOut, ownerId }) {
+function MaterialsPage({ user, onSignOut, ownerId }) {
   const catalogStorageKey = teachingCatalogStorageKey(ownerId);
   const [isCreateClassOpen, setIsCreateClassOpen] = useState(false);
   const [classNameInput, setClassNameInput] = useState("");
@@ -955,7 +791,7 @@ function MaterialsPage({ onSignOut, ownerId }) {
     }
   };
   const [compiledModal, setCompiledModal] = useState(null);
-  const [catalog, setCatalog] = useState(SEEDED_CATALOG);
+  const [catalog, setCatalog] = useState([]);
   const [questionBankSets, setQuestionBankSets] = useState([]);
   const [questionBankInput, setQuestionBankInput] = useState("");
   const [questionPaperEditorOpen, setQuestionPaperEditorOpen] = useState(false);
@@ -972,6 +808,10 @@ function MaterialsPage({ onSignOut, ownerId }) {
   const questionPaperLocalInputRef = useRef(null);
 
   const qbPapersKey = questionBankPapersStorageKey(ownerId);
+
+  useEffect(() => {
+    setLibraryOwnerId(ownerId);
+  }, [ownerId]);
 
   useEffect(() => {
     const localCatalog = loadTeachingCatalog(catalogStorageKey);
@@ -2455,9 +2295,7 @@ function MaterialsPage({ onSignOut, ownerId }) {
           <button className="signout-btn" type="button" onClick={onSignOut}>
             Sign out
           </button>
-          <button className="avatar" type="button" onClick={() => navigateTo("/dashboard")}>
-            LY
-          </button>
+          <UserAvatarButton user={user} onClick={() => navigateTo("/dashboard")} />
         </div>
       </header>
 
@@ -3932,23 +3770,78 @@ function MaterialsPage({ onSignOut, ownerId }) {
   );
 }
 
+function GoogleSignInButton({ disabled, busy, onClick }) {
+  return (
+    <button
+      className="google-btn"
+      type="button"
+      disabled={disabled}
+      onClick={() => void onClick()}
+    >
+      <span className="google-btn-icon" aria-hidden="true">
+        G
+      </span>
+      {busy ? "Connecting…" : "Continue with Google"}
+    </button>
+  );
+}
+
 function SignInPage({
+  onCheckEmail,
   onEmailSignIn,
   onGoogleSignIn,
   onSignUp,
+  onClearAuthMessages,
   authError,
   authSuccess,
   authBusy,
   usesSupabaseAuth,
 }) {
+  const [step, setStep] = useState("email");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
+  const [accountStatus, setAccountStatus] = useState(null);
 
+  const trimmedEmail = email.trim();
   const credentials = () => ({
-    email: email.trim(),
+    email: trimmedEmail,
     password,
   });
+
+  const resetToEmailStep = () => {
+    setStep("email");
+    setPassword("");
+    setAccountStatus(null);
+    onClearAuthMessages();
+  };
+
+  const handleEmailContinue = async (e) => {
+    e.preventDefault();
+    if (!trimmedEmail) return;
+    onClearAuthMessages();
+    if (!usesSupabaseAuth) {
+      setStep("signin");
+      return;
+    }
+    const status = await onCheckEmail(trimmedEmail);
+    setAccountStatus(status);
+    setStep(status === "missing" ? "signup" : "signin");
+  };
+
+  const heroTitle =
+    step === "signup"
+      ? "Create your account"
+      : step === "signin"
+        ? "Welcome back"
+        : "Sign in to your studio";
+
+  const heroText =
+    step === "signup"
+      ? "Choose a password to get started, or use Google instead."
+      : step === "signin"
+        ? "Enter your password to continue."
+        : "A quiet place to plan lessons, share notes, and stay close to every student.";
 
   return (
     <main className="signin-page">
@@ -3960,8 +3853,8 @@ function SignInPage({
       </header>
       <section className="signin-hero">
         <p className="eyebrow">VOL. 01 · THE TEACHER'S DESK</p>
-        <h1>Welcome back to your studio.</h1>
-        <p>A quiet place to plan lessons, share notes, and stay close to every student.</p>
+        <h1>{heroTitle}</h1>
+        <p>{heroText}</p>
       </section>
       {authError ? (
         <p className="auth-error" role="alert">
@@ -3975,97 +3868,147 @@ function SignInPage({
       ) : null}
       {!usesSupabaseAuth ? (
         <p className="auth-hint">
-          Supabase is not configured — sign-in is local only and uploads will not sync to the
-          database.
+          Supabase is not configured — sign-in is unavailable until cloud auth is set up.
         </p>
       ) : null}
-      <form
-        className="signin-form"
-        onSubmit={(e) => {
-          e.preventDefault();
-          void onEmailSignIn(credentials());
-        }}
-      >
-        <label htmlFor="email">EMAIL</label>
-        <input
-          id="email"
-          name="email"
-          type="email"
-          autoComplete="email"
-          value={email}
-          onChange={(e) => setEmail(e.target.value)}
-          disabled={authBusy}
-          required
-        />
-        <label htmlFor="password">PASSWORD</label>
-        <div className="password-field">
+
+      {step === "email" ? (
+        <form className="signin-form" onSubmit={(e) => void handleEmailContinue(e)}>
+          <label htmlFor="email">Email</label>
           <input
-            id="password"
-            name="password"
-            type={showPassword ? "text" : "password"}
-            autoComplete="current-password"
-            value={password}
-            onChange={(e) => setPassword(e.target.value)}
+            id="email"
+            name="email"
+            type="email"
+            autoComplete="email"
+            value={email}
+            onChange={(e) => setEmail(e.target.value)}
             disabled={authBusy}
             required
           />
-          <button
-            type="button"
-            className="password-toggle"
-            onClick={() => setShowPassword((v) => !v)}
-            disabled={authBusy}
-            aria-label={showPassword ? "Hide password" : "Show password"}
-            aria-pressed={showPassword}
-          >
-            {showPassword ? "Hide" : "Show"}
+          <button className="signin-btn" type="submit" disabled={authBusy || !trimmedEmail}>
+            {authBusy ? "Checking…" : "Continue"}
           </button>
-        </div>
-        <div className="signin-row">
-          <label className="remember">
-            <input type="checkbox" defaultChecked disabled={authBusy} />
-            <span>Remember me</span>
-          </label>
-          <a href="#">Forgot password?</a>
-        </div>
-        <button className="signin-btn" type="submit" disabled={authBusy}>
-          {authBusy ? "Signing in…" : "Sign in →"}
-        </button>
-        {usesSupabaseAuth ? (
-          <button
-            className="signin-secondary-btn"
-            type="button"
-            disabled={authBusy}
-            onClick={() => void onSignUp(credentials())}
+          {usesSupabaseAuth ? (
+            <>
+              <div className="divider">
+                <span>or</span>
+              </div>
+              <GoogleSignInButton
+                disabled={authBusy}
+                busy={authBusy}
+                onClick={onGoogleSignIn}
+              />
+            </>
+          ) : null}
+        </form>
+      ) : (
+        <div className="signin-form">
+          <p className="signin-email-display">
+            <span className="signin-email-value">{trimmedEmail}</span>
+            <button
+              type="button"
+              className="link-btn signin-change-email"
+              disabled={authBusy}
+              onClick={resetToEmailStep}
+            >
+              Change
+            </button>
+          </p>
+
+          {step === "signup" ? (
+            <div className="auth-notice auth-notice--new" role="status">
+              <strong>No account found for this email.</strong>
+              <p>
+                Create an account with a password below, or sign in with Google if you use Google
+                for this address.
+              </p>
+            </div>
+          ) : null}
+
+          <form
+            onSubmit={(e) => {
+              e.preventDefault();
+              if (step === "signup") {
+                void onSignUp(credentials());
+              } else {
+                void onEmailSignIn(credentials());
+              }
+            }}
           >
-            Create account
-          </button>
-        ) : null}
-        <div className="divider">
-          <span>OR</span>
+            <label htmlFor="password">{step === "signup" ? "Choose a password" : "Password"}</label>
+            <div className="password-field">
+              <input
+                id="password"
+                name="password"
+                type={showPassword ? "text" : "password"}
+                autoComplete={step === "signup" ? "new-password" : "current-password"}
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                disabled={authBusy}
+                required
+              />
+              <button
+                type="button"
+                className="password-toggle"
+                onClick={() => setShowPassword((v) => !v)}
+                disabled={authBusy}
+                aria-label={showPassword ? "Hide password" : "Show password"}
+                aria-pressed={showPassword}
+              >
+                {showPassword ? "Hide" : "Show"}
+              </button>
+            </div>
+
+            {step === "signin" ? (
+              <div className="signin-row">
+                <span />
+                <a href="#">Forgot password?</a>
+              </div>
+            ) : null}
+
+            <button className="signin-btn" type="submit" disabled={authBusy}>
+              {authBusy
+                ? step === "signup"
+                  ? "Creating account…"
+                  : "Signing in…"
+                : step === "signup"
+                  ? "Create account"
+                  : "Sign in"}
+            </button>
+          </form>
+
+          {step === "signin" && accountStatus === "unknown" ? (
+            <p className="signin-alt-hint">
+              New here?{" "}
+              <button
+                type="button"
+                className="link-btn"
+                disabled={authBusy}
+                onClick={() => {
+                  onClearAuthMessages();
+                  setStep("signup");
+                }}
+              >
+                Create an account
+              </button>
+            </p>
+          ) : null}
+
+          {usesSupabaseAuth ? (
+            <>
+              <div className="divider">
+                <span>or</span>
+              </div>
+              <GoogleSignInButton
+                disabled={authBusy}
+                busy={authBusy}
+                onClick={onGoogleSignIn}
+              />
+            </>
+          ) : null}
         </div>
-        <button
-          className="google-btn"
-          type="button"
-          disabled={authBusy || !usesSupabaseAuth}
-          onClick={() => void onGoogleSignIn()}
-        >
-          Continue with Google
-        </button>
-      </form>
-      <p className="invite-copy">
-        New to Enlightly?{" "}
-        {usesSupabaseAuth ? (
-          <button
-            type="button"
-            className="link-btn"
-            onClick={() => void onSignUp(credentials())}
-          >
-            Create an account
-          </button>
-        ) : (
-          <span>Configure Supabase to create an account.</span>
-        )}
-      </p>
+      )}
+
       <p className="footer-copy">© Enlightly · Crafted for educators</p>
     </main>
   );
@@ -4095,7 +4038,10 @@ export default function App() {
     let alive = true;
     supabase.auth.getSession().then(({ data: { session: s } }) => {
       if (!alive) return;
-      if (s?.user?.id) migrateUnscopedStorageToUser(s.user.id);
+      if (s?.user?.id) {
+        clearLegacyUnscopedStorage();
+        setLibraryOwnerId(s.user.id);
+      }
       setSession(s);
       setAuthReady(true);
     });
@@ -4103,7 +4049,11 @@ export default function App() {
       data: { subscription },
     } = supabase.auth.onAuthStateChange((event, s) => {
       if (s?.user?.id && (event === "SIGNED_IN" || event === "INITIAL_SESSION")) {
-        migrateUnscopedStorageToUser(s.user.id);
+        clearLegacyUnscopedStorage();
+        setLibraryOwnerId(s.user.id);
+      }
+      if (!s?.user) {
+        setLibraryOwnerId(null);
       }
       setSession(s);
       setAuthReady(true);
@@ -4113,6 +4063,21 @@ export default function App() {
       subscription.unsubscribe();
     };
   }, []);
+
+  const handleCheckEmail = async (rawEmail) => {
+    const trimmedEmail = (rawEmail ?? "").trim();
+    if (!trimmedEmail || !supabase) return "unknown";
+    setAuthBusy(true);
+    const { data, error } = await supabase.rpc("user_exists_by_email", {
+      check_email: trimmedEmail,
+    });
+    setAuthBusy(false);
+    if (error) {
+      // RPC not deployed yet — fall back to password step with both options.
+      return "unknown";
+    }
+    return data ? "exists" : "missing";
+  };
 
   const handleEmailSignIn = async ({ email: rawEmail, password: rawPassword } = {}) => {
     setAuthError(null);
@@ -4136,7 +4101,14 @@ export default function App() {
     });
     setAuthBusy(false);
     if (error) {
-      setAuthError(error.message);
+      const msg = (error.message ?? "").toLowerCase();
+      if (msg.includes("invalid login credentials") || msg.includes("invalid credentials")) {
+        setAuthError(
+          "Incorrect password. Try again, create an account if you are new, or continue with Google."
+        );
+      } else {
+        setAuthError(error.message);
+      }
       return;
     }
     navigateTo("/dashboard");
@@ -4200,7 +4172,16 @@ export default function App() {
       },
     });
     setAuthBusy(false);
-    if (error) setAuthError(error.message);
+    if (error) {
+      const msg = (error.message ?? "").toLowerCase();
+      if (msg.includes("provider is not enabled") || msg.includes("unsupported provider")) {
+        setAuthError(
+          "Google sign-in is not enabled yet. In Supabase go to Authentication → Providers → Google, turn it on, and add your Google OAuth client ID and secret."
+        );
+      } else {
+        setAuthError(error.message);
+      }
+    }
   };
 
   const handleSignOut = async () => {
@@ -4212,9 +4193,14 @@ export default function App() {
   };
 
   const signInProps = {
+    onCheckEmail: handleCheckEmail,
     onEmailSignIn: handleEmailSignIn,
     onGoogleSignIn: handleGoogleSignIn,
     onSignUp: handleSignUp,
+    onClearAuthMessages: () => {
+      setAuthError(null);
+      setAuthSuccess(null);
+    },
     authError,
     authSuccess,
     authBusy,
@@ -4243,10 +4229,17 @@ export default function App() {
       navigateTo("/");
       return null;
     }
-    return <MaterialsPage onSignOut={handleSignOut} ownerId={session.user.id} />;
+    return (
+      <MaterialsPage
+        key={session.user.id}
+        user={session.user}
+        onSignOut={handleSignOut}
+        ownerId={session.user.id}
+      />
+    );
   }
   if (path === "/dashboard" || path === "/") {
-    return <DashboardPage onSignOut={handleSignOut} />;
+    return <DashboardPage user={session.user} onSignOut={handleSignOut} />;
   }
-  return <DashboardPage onSignOut={handleSignOut} />;
+  return <DashboardPage user={session.user} onSignOut={handleSignOut} />;
 }

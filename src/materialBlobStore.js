@@ -1,12 +1,23 @@
-const DB_NAME = "enlightly-library";
 const STORE = "materialBlobs";
 const MATERIALS_STORE = "materials";
 const QUESTIONS_STORE = "questions";
 const DB_VERSION = 3;
+let activeOwnerId = null;
+
+/** Scope IndexedDB to the signed-in user so shared browsers do not leak file blobs. */
+export function setLibraryOwnerId(ownerId) {
+  activeOwnerId = ownerId || null;
+}
+
+function libraryDbName() {
+  return activeOwnerId
+    ? `enlightly-library-${activeOwnerId}`
+    : "enlightly-library-unsigned";
+}
 
 function openLibraryDb() {
   return new Promise((resolve, reject) => {
-    const req = indexedDB.open(DB_NAME, DB_VERSION);
+    const req = indexedDB.open(libraryDbName(), DB_VERSION);
     req.onerror = () => reject(req.error);
     req.onsuccess = () => resolve(req.result);
     req.onupgradeneeded = (event) => {

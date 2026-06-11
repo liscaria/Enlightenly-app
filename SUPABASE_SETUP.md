@@ -70,13 +70,39 @@ Run `db/supabase/policies.sql` so Row Level Security enforces this in Postgres.
 
 Or create a user manually: **Authentication** → **Users** → **Add user**.
 
-### Google (optional)
+### Google sign-in
 
-1. **Authentication** → **Providers** → **Google** → enable.
-2. Follow Supabase’s guide to add Google OAuth client ID/secret.
-3. Under **URL configuration**, add redirect URLs:
+The error **“Unsupported provider: provider is not enabled”** means Google is
+turned off in Supabase. Enable it as follows.
+
+#### A. Enable Google in Supabase
+
+1. Open your project at [supabase.com/dashboard](https://supabase.com/dashboard).
+2. Go to **Authentication** → **Providers** → **Google**.
+3. Turn **Enable Sign in with Google** **on**.
+4. Leave this tab open — you need the **Callback URL** shown there (looks like
+   `https://YOUR-PROJECT.supabase.co/auth/v1/callback`).
+
+#### B. Create Google OAuth credentials
+
+1. Open [Google Cloud Console](https://console.cloud.google.com/) → **APIs & Services** → **Credentials**.
+2. **Create credentials** → **OAuth client ID**.
+3. If prompted, configure the **OAuth consent screen** first (External is fine for testing).
+4. Application type: **Web application**.
+5. **Authorized redirect URIs** — add the Supabase callback URL from step A4 exactly.
+6. **Create** → copy the **Client ID** and **Client secret**.
+
+#### C. Finish Supabase setup
+
+1. Back in Supabase **Google** provider settings, paste the **Client ID** and **Client secret**.
+2. **Save**.
+3. Go to **Authentication** → **URL configuration** → **Redirect URLs** and add:
    - `http://localhost:5173/dashboard`
-   - Your production URL + `/dashboard` when you deploy.
+   - `http://localhost:5174/dashboard` (Vite may use 5174 if 5173 is busy)
+   - Your Vercel URL, e.g. `https://enlightenly-app-e7sh.vercel.app/dashboard`
+4. **Site URL** can stay as your production URL, or `http://localhost:5174` while developing locally.
+
+Restart is not required in the app — try **Continue with Google** again after saving.
 
 ## 5. Wire credentials into the app
 
