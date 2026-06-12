@@ -99,7 +99,8 @@ turned off in Supabase. Enable it as follows.
 3. Go to **Authentication** → **URL configuration** → **Redirect URLs** and add:
    - `http://localhost:5173/dashboard`
    - `http://localhost:5174/dashboard` (Vite may use 5174 if 5173 is busy)
-   - Your Vercel URL, e.g. `https://enlightenly-app-e7sh.vercel.app/dashboard`
+   - `https://enlightenly-app.vercel.app/dashboard`
+   - `https://enlightenly-app-e7sh.vercel.app/dashboard` (if you use the older project URL)
 4. **Site URL** can stay as your production URL, or `http://localhost:5174` while developing locally.
 
 Restart is not required in the app — try **Continue with Google** again after saving.
