@@ -96,12 +96,15 @@ turned off in Supabase. Enable it as follows.
 
 1. Back in Supabase **Google** provider settings, paste the **Client ID** and **Client secret**.
 2. **Save**.
-3. Go to **Authentication** → **URL configuration** → **Redirect URLs** and add:
-   - `http://localhost:5173/dashboard`
-   - `http://localhost:5174/dashboard` (Vite may use 5174 if 5173 is busy)
-   - `https://enlightenly-app.vercel.app/dashboard`
-   - `https://enlightenly-app-e7sh.vercel.app/dashboard` (if you use the older project URL)
-4. **Site URL** can stay as your production URL, or `http://localhost:5174` while developing locally.
+3. Go to **Authentication** → **URL configuration**:
+   - **Site URL**: `https://enlightenly-app.vercel.app` (must be your live Vercel domain — not an old preview URL)
+   - **Redirect URLs** — add each of these:
+     - `http://localhost:5173/dashboard`
+     - `http://localhost:5174/dashboard` (Vite may use 5174 if 5173 is busy)
+     - `https://enlightenly-app.vercel.app/dashboard`
+     - `https://enlightenly-app.vercel.app/**` (wildcard covers `/dashboard` after OAuth)
+4. Remove any **old** Vercel URLs from Site URL and Redirect URLs (e.g. `enlightenly-app-e7sh.vercel.app`). If Supabase redirects to a deleted deployment, you get Vercel **404 DEPLOYMENT_NOT_FOUND** after login.
+5. In Vercel → **Settings** → **Environment Variables**, set `VITE_APP_URL` = `https://enlightenly-app.vercel.app` for Production, then redeploy.
 
 Restart is not required in the app — try **Continue with Google** again after saving.
 

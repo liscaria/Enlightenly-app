@@ -14,8 +14,53 @@ const PAGE_BREAK = "\n\n---PAGE---\n\n";
 const MAX_QUESTIONS = 300;
 const AI_CHUNK_SIZE = 28000;
 
+/** CBSE papers often print Hindi and English — keep English/Latin text only. */
+export function englishOnlyQuestionText(text) {
+  if (!text || typeof text !== "string") return "";
+  let s = text.replace(/[\u0900-\u097F]+/g, " ");
+  // Drop common PDF custom-font mojibake symbols from Hindi layers
+  s = s.replace(/[§$©±¶{}/\\|~<>^&·•]/g, " ");
+  const lines = s
+    .split(/\n+/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  const englishLines = lines.filter((line) => /[A-Za-z]{3,}/.test(line));
+  s = (englishLines.length ? englishLines : lines).join("\n");
+  return s
+    .replace(/[ \t]+/g, " ")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+/** Score how readable a text fragment is as English exam prose. */
+function englishReadabilityScore(text) {
+  if (!text) return 0;
+  const cleaned = text.trim();
+  if (!cleaned) return 0;
+  const words = cleaned.match(/[A-Za-z]{3,}/g) || [];
+  const letters = (cleaned.match(/[A-Za-z]/g) || []).length;
+  const nonSpace = cleaned.replace(/\s/g, "").length;
+  if (!nonSpace) return 0;
+  const letterRatio = letters / nonSpace;
+  const weird = (cleaned.match(/[§$©±¶{}/\\|~<>^&]/g) || []).length;
+  return words.length * 12 + letterRatio * 40 - weird * 8;
+}
+
+export function looksLikeEnglishQuestionText(text) {
+  if (!text || text.length < 12) return false;
+  const letters = (text.match(/[A-Za-z]/g) || []).length;
+  const nonSpace = text.replace(/\s/g, "").length;
+  if (!nonSpace || letters / nonSpace < 0.45) return false;
+  const words = text.match(/[A-Za-z]{3,}/g) || [];
+  if (words.length < 2) return false;
+  const weird = (text.match(/[§$©±¶{}/\\|~<>^&]/g) || []).length;
+  if (weird > 1) return false;
+  return englishReadabilityScore(text) >= 18;
+}
+
 function normalizeQuestion(item, index) {
-  const text = (item.questionText ?? item.question_text ?? item.text ?? "").trim();
+  const raw = (item.questionText ?? item.question_text ?? item.text ?? "").trim();
+  const text = englishOnlyQuestionText(raw);
   if (!text) return null;
   const marksRaw = item.marks ?? item.mark ?? null;
   const marks =
@@ -23,12 +68,15 @@ function normalizeQuestion(item, index) {
       ? null
       : Number(marksRaw);
   const solutionRaw = item.solution ?? item.answer ?? null;
+  const solution =
+    solutionRaw && `${solutionRaw}`.trim()
+      ? englishOnlyQuestionText(`${solutionRaw}`.trim())
+      : null;
   return {
     questionNo: Number(item.questionNo ?? item.question_no ?? index + 1),
     questionText: text,
     marks: Number.isFinite(marks) ? marks : null,
-    solution:
-      solutionRaw && `${solutionRaw}`.trim() ? `${solutionRaw}`.trim() : null,
+    solution: solution || null,
     topic: item.topic ?? null,
   };
 }
@@ -50,6 +98,71 @@ function dedupeQuestions(questions) {
 
 const LINE_Y_TOLERANCE = 4;
 const MARGIN_X_RATIO = 0.68;
+/** CBSE bilingual papers: Hindi column is usually left of this ratio. */
+const ENGLISH_COLUMN_MIN_RATIO = 0.42;
+
+function joinLineItems(items) {
+  return items
+    .map((item) => item.str)
+    .join(" ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+/** Split a PDF line into English body (ignore Hindi column) and right-margin marks. */
+function splitLineBodyAndMargin(line, pageWidth) {
+  if (!line?.items?.length) return { body: "", marginMark: null };
+
+  const marginThreshold = pageWidth * MARGIN_X_RATIO;
+  const mid = pageWidth * 0.5;
+  const marginItems = [];
+  const contentItems = [];
+
+  for (const item of line.items) {
+    const trimmed = item.str.trim();
+    if (!trimmed) continue;
+    const isFarRight = item.x >= marginThreshold;
+    const isMarkLike = /^\d{1,2}(?:\.\d+)?$/.test(trimmed);
+    if (isFarRight && isMarkLike) {
+      marginItems.push(item);
+    } else if (item.x < marginThreshold) {
+      contentItems.push(item);
+    }
+  }
+
+  const leftBody = joinLineItems(contentItems.filter((item) => item.x < mid));
+  const rightBody = joinLineItems(contentItems.filter((item) => item.x >= mid));
+  const englishBandBody = joinLineItems(
+    contentItems.filter((item) => item.x >= pageWidth * ENGLISH_COLUMN_MIN_RATIO)
+  );
+
+  let body = "";
+  const leftScore = englishReadabilityScore(leftBody);
+  const rightScore = englishReadabilityScore(rightBody);
+  const bandScore = englishReadabilityScore(englishBandBody);
+
+  if (rightScore >= leftScore && rightScore >= bandScore && rightScore > 0) {
+    body = rightBody;
+  } else if (bandScore >= leftScore && bandScore > 0) {
+    body = englishBandBody;
+  } else if (leftScore > 0) {
+    body = leftBody;
+  } else {
+    body = joinLineItems(contentItems);
+  }
+
+  body = englishOnlyQuestionText(body);
+
+  const marginRaw = marginItems.length
+    ? marginItems[marginItems.length - 1].str.trim()
+    : null;
+  const marginMark =
+    marginRaw != null && /^\d{1,2}(?:\.\d+)?$/.test(marginRaw)
+      ? Number(marginRaw)
+      : null;
+
+  return { body, marginMark };
+}
 
 function groupItemsIntoLines(items) {
   const positioned = (items || [])
@@ -79,42 +192,6 @@ function groupItemsIntoLines(items) {
     line.items.sort((a, b) => a.x - b.x);
   }
   return lines;
-}
-
-/** Split a PDF text line into body (left/center) and margin mark (far right). */
-function splitLineBodyAndMargin(line, pageWidth) {
-  if (!line?.items?.length) return { body: "", marginMark: null };
-
-  const marginThreshold = pageWidth * MARGIN_X_RATIO;
-  const bodyItems = [];
-  const marginItems = [];
-
-  for (const item of line.items) {
-    const trimmed = item.str.trim();
-    if (!trimmed) continue;
-    const isFarRight = item.x >= marginThreshold;
-    const isMarkLike = /^\d{1,2}(?:\.\d+)?$/.test(trimmed);
-    if (isFarRight && isMarkLike) {
-      marginItems.push(item);
-    } else {
-      bodyItems.push(item);
-    }
-  }
-
-  const body = bodyItems
-    .map((item) => item.str)
-    .join(" ")
-    .replace(/\s+/g, " ")
-    .trim();
-  const marginRaw = marginItems.length
-    ? marginItems[marginItems.length - 1].str.trim()
-    : null;
-  const marginMark =
-    marginRaw != null && /^\d{1,2}(?:\.\d+)?$/.test(marginRaw)
-      ? Number(marginRaw)
-      : null;
-
-  return { body, marginMark };
 }
 
 function structuredLinesToText(lines) {
@@ -154,6 +231,7 @@ function extractMarksFromChunk(body, marginCandidates = []) {
 function finalizeStructuredQuestion(current) {
   const body = current.lines.join("\n").trim();
   if (body.length < 15) return null;
+  if (!looksLikeEnglishQuestionText(body)) return null;
 
   const solutionMatch = body.match(
     /(?:^|\n)(?:Solution|Answer)\s*[:.\-]\s*([\s\S]+)$/i
@@ -165,7 +243,7 @@ function finalizeStructuredQuestion(current) {
     questionText = body.slice(0, solutionMatch.index).trim();
   }
 
-  return normalizeQuestion(
+  const normalized = normalizeQuestion(
     {
       questionNo: current.questionNo,
       questionText,
@@ -174,6 +252,27 @@ function finalizeStructuredQuestion(current) {
     },
     current.questionNo - 1
   );
+  if (!normalized || !looksLikeEnglishQuestionText(normalized.questionText)) {
+    return null;
+  }
+  return normalized;
+}
+
+function isQuestionStartLine(body) {
+  // ASCII period only — avoid "1·47" refractive-index values starting a fake Q1
+  const match = body.match(/^(\d{1,2})\.(?!\d)\s*(.*)$/s);
+  if (!match) return null;
+  const rest = (match[2] || "").trim();
+  if (!rest) return match;
+  if (/^\d/.test(rest)) return null;
+  if (englishReadabilityScore(rest) < 8 && !/^\(?[A-D]\)?[\).:\s]/i.test(rest)) {
+    return null;
+  }
+  return match;
+}
+
+function isMcqOptionLine(body) {
+  return /^\(\s*[A-D]\s*\)/i.test(body) || /^[A-D][\).:\s]/i.test(body);
 }
 
 /** Extract questions using PDF x/y layout (CBSE margin marks on the right). */
@@ -186,7 +285,7 @@ function extractQuestionsFromStructuredPages(pages) {
       const body = line.body?.trim() || "";
       if (!body || isSectionOrHeaderLine(body)) continue;
 
-      const questionStart = body.match(/^(\d{1,2})\.\s*(.*)$/s);
+      const questionStart = isQuestionStartLine(body);
       if (questionStart) {
         if (current) {
           const finalized = finalizeStructuredQuestion(current);
@@ -202,6 +301,8 @@ function extractQuestionsFromStructuredPages(pages) {
       }
 
       if (!current) continue;
+
+      if (!isMcqOptionLine(body) && !looksLikeEnglishQuestionText(body)) continue;
 
       if (line.marginMark != null) current.marginCandidates.push(line.marginMark);
       current.lines.push(body);
@@ -386,7 +487,7 @@ async function extractWithOpenAISingle(text, fileName) {
         {
           role: "system",
           content:
-            'You extract exam questions from teacher question papers. Return JSON: {"questions":[{"questionNo":1,"questionText":"full question text","marks":2,"solution":"answer text or null","topic":null}]}. Extract EVERY numbered question in the text chunk. In CBSE papers, marks appear as a number in the right margin of the question row (e.g. "1" means 1 mark) — they may appear in the text as "[1 marks]" tags. Include multiple-choice options (A,B,C,D) inside questionText. Use null for unknown marks or solution. Do not invent content.',
+            'You extract exam questions from teacher question papers. Return JSON: {"questions":[{"questionNo":1,"questionText":"full question text","marks":2,"solution":"answer text or null","topic":null}]}. Extract EVERY numbered question in the text chunk. CBSE papers often print Hindi and English — put questionText and solution in English only; omit Hindi/Devanagari and any garbled symbols. Skip lines that are not valid English. In CBSE papers, marks appear as a number in the right margin of the question row (e.g. "1" means 1 mark) — they may appear in the text as "[1 marks]" tags. Include multiple-choice options (A,B,C,D) inside questionText. Use null for unknown marks or solution. Do not invent content.',
         },
         {
           role: "user",
@@ -412,7 +513,8 @@ async function extractWithOpenAISingle(text, fileName) {
   const list = Array.isArray(parsed) ? parsed : parsed.questions || [];
   return list
     .map((item, index) => normalizeQuestion(item, index))
-    .filter(Boolean);
+    .filter(Boolean)
+    .filter((q) => looksLikeEnglishQuestionText(q.questionText));
 }
 
 async function extractWithOpenAI(text, fileName) {
@@ -466,7 +568,7 @@ export async function extractQuestionsFromDocument(blob, { name, mimeType } = {}
 
   if (OPENAI_API_KEY && text.trim()) {
     try {
-      const questions = await extractWithOpenAI(text, name || "question-paper");
+      let questions = await extractWithOpenAI(text, name || "question-paper");
       if (questions.length) {
         return { questions, extractedBy: "ai" };
       }
@@ -482,7 +584,8 @@ export async function extractQuestionsFromDocument(blob, { name, mimeType } = {}
     }
   }
 
-  const questions = extractWithHeuristics(text);
+  const questions = extractWithHeuristics(text)
+    .filter((q) => looksLikeEnglishQuestionText(q.questionText));
   return {
     questions,
     extractedBy: questions.length ? "heuristic" : "none",
@@ -493,9 +596,9 @@ export function assignQuestionIds(questions, extractedBy = "manual") {
   return questions.map((q, index) => ({
     id: q.id || crypto.randomUUID(),
     questionNo: q.questionNo ?? index + 1,
-    questionText: q.questionText,
+    questionText: englishOnlyQuestionText(q.questionText || ""),
     marks: q.marks ?? null,
-    solution: q.solution ?? null,
+    solution: q.solution ? englishOnlyQuestionText(q.solution) : null,
     topic: q.topic ?? null,
     chapterId: q.chapterId ?? null,
     unitId: q.unitId ?? null,

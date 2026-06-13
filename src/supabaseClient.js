@@ -13,9 +13,23 @@ export const isSupabaseConfigured = Boolean(supabaseUrl && supabaseAnonKey);
 
 export const supabase = isSupabaseConfigured
   ? createClient(supabaseUrl, supabaseAnonKey, {
-      auth: { persistSession: true, autoRefreshToken: true },
+      auth: {
+        persistSession: true,
+        autoRefreshToken: true,
+        detectSessionInUrl: true,
+      },
     })
   : null;
+
+/** Canonical app origin for OAuth/email redirects (avoids dead preview deployment URLs). */
+export function authRedirectUrl(path = "/dashboard") {
+  const configured = (import.meta.env.VITE_APP_URL || "").trim().replace(/\/$/, "");
+  const origin =
+    configured ||
+    (typeof window !== "undefined" ? window.location.origin : "");
+  const suffix = path.startsWith("/") ? path : `/${path}`;
+  return `${origin}${suffix}`;
+}
 
 if (!isSupabaseConfigured && typeof window !== "undefined") {
   // eslint-disable-next-line no-console

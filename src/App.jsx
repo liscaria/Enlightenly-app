@@ -49,9 +49,15 @@ import { remoteQueryQuestionBank } from "./api/questionBankRemote.js";
 import {
   questionBankRowToEntry,
   questionsByChapter,
+  questionsForPaperOrMaterial,
   sortChapterBankQuestions,
+  sortPaperBankQuestions,
 } from "./api/questionBankUtils.js";
-import { supabase, isSupabaseConfigured } from "./supabaseClient.js";
+import {
+  supabase,
+  isSupabaseConfigured,
+  authRedirectUrl,
+} from "./supabaseClient.js";
 
 const MATERIAL_CATEGORIES = ["Syllabus", "Class Notes", "Question papers"];
 const CHAPTER_MATERIAL_LEFT = ["Class Notes"];
@@ -904,6 +910,7 @@ function MaterialsPage({ user, onSignOut, ownerId }) {
   const [editModal, setEditModal] = useState(null);
   const [editText, setEditText] = useState("");
   const [fileWindowModal, setFileWindowModal] = useState(null);
+  const [questionPaperModal, setQuestionPaperModal] = useState(null);
   const [fileRenameEditing, setFileRenameEditing] = useState(false);
   const [fileRenameDraft, setFileRenameDraft] = useState("");
   const [materialError, setMaterialError] = useState(null);
@@ -1097,20 +1104,33 @@ function MaterialsPage({ user, onSignOut, ownerId }) {
     if (href) window.open(href, "_blank", "noopener,noreferrer");
   };
 
-  const openQuestionPaperFileWindow = (paper, classItem) => {
+  const openQuestionPaperFileWindow = (
+    paper,
+    classItem,
+    { unit, chapter, source = "questionBank" } = {}
+  ) => {
     setFileRenameEditing(false);
     setFileRenameDraft("");
-    setFileWindowModal({
-      kind: "questionPaper",
+    setFileWindowModal(null);
+    setQuestionPaperModal({
       paper,
+      view: "questions",
+      source,
+      unit: unit || null,
+      chapter: chapter || null,
       classItem:
         classItem ||
         catalog.find((c) => c.id === paper.classId) || {
           id: paper.classId,
           name: paper.className || paper.classId,
         },
-      file: previewFileShape(paper),
     });
+  };
+
+  const closeQuestionPaperModal = () => {
+    setQuestionPaperModal(null);
+    setFileRenameEditing(false);
+    setFileRenameDraft("");
   };
 
   const closeFileWindowModal = () => {
@@ -1120,8 +1140,11 @@ function MaterialsPage({ user, onSignOut, ownerId }) {
   };
 
   const startFileRename = () => {
-    if (!fileWindowModal) return;
-    setFileRenameDraft(fileWindowModal.file.name);
+    const modalFile = questionPaperModal
+      ? previewFileShape(questionPaperModal.paper)
+      : fileWindowModal?.file;
+    if (!modalFile) return;
+    setFileRenameDraft(modalFile.name);
     setFileRenameEditing(true);
   };
 
@@ -1131,31 +1154,24 @@ function MaterialsPage({ user, onSignOut, ownerId }) {
   };
 
   const renameFileDisplayName = async () => {
-    if (!fileWindowModal) return;
     const newName = fileRenameDraft.trim();
     if (!newName) {
       setMaterialError("Display name cannot be empty.");
       return;
     }
-    const { file } = fileWindowModal;
-    if (newName === file.name) {
-      cancelFileRename();
-      return;
-    }
 
-    if (fileWindowModal.kind === "questionPaper") {
-      const { paper } = fileWindowModal;
+    if (questionPaperModal) {
+      const { paper } = questionPaperModal;
+      const file = previewFileShape(paper);
+      if (newName === file.name) {
+        cancelFileRename();
+        return;
+      }
       setQuestionBankPapers((prev) =>
         prev.map((p) => (p.id === paper.id ? { ...p, name: newName } : p))
       );
-      setFileWindowModal((prev) =>
-        prev
-          ? {
-              ...prev,
-              paper: { ...prev.paper, name: newName },
-              file: { ...prev.file, name: newName },
-            }
-          : null
+      setQuestionPaperModal((prev) =>
+        prev ? { ...prev, paper: { ...prev.paper, name: newName } } : null
       );
       try {
         const lib = await libraryGet(paper.id);
@@ -1176,6 +1192,13 @@ function MaterialsPage({ user, onSignOut, ownerId }) {
           );
         }
       }
+      cancelFileRename();
+      return;
+    }
+
+    if (!fileWindowModal) return;
+    const { file } = fileWindowModal;
+    if (newName === file.name) {
       cancelFileRename();
       return;
     }
@@ -1486,10 +1509,22 @@ function MaterialsPage({ user, onSignOut, ownerId }) {
     setPractiseQuestionsModal({ classItem, unit, chapter });
   };
 
+  const openChapterMaterialFile = (classItem, unit, chapter, file) => {
+    setQuestionPaperModal(null);
+    setFileWindowModal({
+      kind: "material",
+      classItem,
+      unit,
+      chapter,
+      file: previewFileShape(file),
+    });
+  };
+
   const renderChapterMaterialFiles = (classItem, unit, chapter, files, category) => {
     if (!files.length) {
       return <p className="chapter-category-empty">0 files</p>;
     }
+    const isQuestionPaperCategory = category === "Question papers";
     return (
       <>
         <ul className="chapter-sources">
@@ -1500,13 +1535,13 @@ function MaterialsPage({ user, onSignOut, ownerId }) {
                 type="button"
                 className="source-name-btn"
                 onClick={() =>
-                  setFileWindowModal({
-                    kind: "material",
-                    classItem,
-                    unit,
-                    chapter,
-                    file: previewFileShape(file),
-                  })
+                  isQuestionPaperCategory
+                    ? openQuestionPaperFileWindow(file, classItem, {
+                        unit,
+                        chapter,
+                        source: "chapterMaterial",
+                      })
+                    : openChapterMaterialFile(classItem, unit, chapter, file)
                 }
               >
                 {file.name}
@@ -1622,13 +1657,9 @@ function MaterialsPage({ user, onSignOut, ownerId }) {
       setQuestionBankPapers((prev) =>
         prev.map((p) => (p.id === paper.id ? updatedPaper : p))
       );
-      setFileWindowModal((prev) =>
-        prev?.kind === "questionPaper" && prev.paper.id === paper.id
-          ? {
-              ...prev,
-              paper: updatedPaper,
-              file: previewFileShape({ ...updatedPaper, name: paper.name }),
-            }
+      setQuestionPaperModal((prev) =>
+        prev?.paper.id === paper.id
+          ? { ...prev, paper: updatedPaper }
           : prev
       );
       const blobUrl = URL.createObjectURL(picked);
@@ -2250,6 +2281,9 @@ function MaterialsPage({ user, onSignOut, ownerId }) {
       /* may not exist locally */
     }
     setQuestionBankPapers((prev) => prev.filter((p) => p.id !== paper.id));
+    setQuestionPaperModal((prev) =>
+      prev?.paper?.id === paper.id ? null : prev
+    );
     setFileWindowModal((prev) =>
       prev?.file?.id === paper.id ? null : prev
     );
@@ -3443,6 +3477,261 @@ function MaterialsPage({ user, onSignOut, ownerId }) {
         </div>
       )}
 
+      {questionPaperModal ? (
+        <div
+          className="modal-backdrop modal-backdrop--fullscreen"
+          role="presentation"
+          onClick={closeQuestionPaperModal}
+        >
+          <div
+            className="practise-questions-modal question-paper-view-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="question-paper-title"
+            onClick={(e) => e.stopPropagation()}
+          >
+            {(() => {
+              const { paper, classItem, unit, chapter, source, view } =
+                questionPaperModal;
+              const file = previewFileShape(paper);
+              const paperHref = hrefFor(file);
+              const items = sortPaperBankQuestions(
+                questionsForPaperOrMaterial(questionBankEntries, paper.id)
+              );
+              return (
+                <>
+                  <div className="question-paper-modal-head">
+                    <div className="file-window-title-row">
+                      {fileRenameEditing ? (
+                        <form
+                          className="file-rename-form"
+                          onSubmit={(e) => {
+                            e.preventDefault();
+                            void renameFileDisplayName();
+                          }}
+                        >
+                          <label className="file-rename-label" htmlFor="qp-rename-input">
+                            Display name
+                          </label>
+                          <input
+                            id="qp-rename-input"
+                            type="text"
+                            className="file-rename-input"
+                            value={fileRenameDraft}
+                            onChange={(e) => setFileRenameDraft(e.target.value)}
+                            autoFocus
+                          />
+                          <div className="file-rename-actions">
+                            <button type="button" onClick={cancelFileRename}>
+                              Cancel
+                            </button>
+                            <button type="submit">Save</button>
+                          </div>
+                        </form>
+                      ) : (
+                        <>
+                          <h2 id="question-paper-title">{paper.name}</h2>
+                          <button
+                            type="button"
+                            className="file-rename-edit-btn"
+                            title="Rename display name"
+                            aria-label={`Rename ${paper.name}`}
+                            onClick={startFileRename}
+                          >
+                            <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
+                              <path
+                                fill="currentColor"
+                                d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.04a1.003 1.003 0 0 0 0-1.42l-2.34-2.34a1.003 1.003 0 0 0-1.42 0l-1.83 1.83 3.75 3.75 1.84-1.82z"
+                              />
+                            </svg>
+                          </button>
+                        </>
+                      )}
+                    </div>
+                    <div className="question-paper-modal-toolbar">
+                      <button
+                        type="button"
+                        className="question-paper-view-toggle"
+                        onClick={() =>
+                          setQuestionPaperModal((prev) =>
+                            prev
+                              ? {
+                                  ...prev,
+                                  view: prev.view === "questions" ? "original" : "questions",
+                                }
+                              : null
+                          )
+                        }
+                      >
+                        {view === "questions"
+                          ? "View original upload"
+                          : "View extracted questions"}
+                      </button>
+                      {view === "original" && paperHref ? (
+                        <button
+                          type="button"
+                          className="file-window-fullscreen-btn question-paper-fullscreen-btn"
+                          title="Full screen"
+                          aria-label="Open file in full screen"
+                          onClick={() => requestPreviewFullscreen(file)}
+                        >
+                          <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
+                            <path
+                              fill="currentColor"
+                              d="M5 5h5V3H3v7h2V5zm9-2v2h5v5h2V3h-7zm5 16h-5v2h7v-7h-2v5zM5 14H3v7h7v-2H5v-5z"
+                            />
+                          </svg>
+                        </button>
+                      ) : null}
+                      <button
+                        type="button"
+                        className="modal-close-btn"
+                        aria-label="Close"
+                        onClick={closeQuestionPaperModal}
+                      >
+                        ×
+                      </button>
+                    </div>
+                  </div>
+                  <p className="compiled-modal-meta">
+                    {classItem.name}
+                    {unit?.name
+                      ? ` · ${unit.name}${unit.title ? ` — ${unit.title}` : ""}`
+                      : ""}
+                    {chapter?.name ? ` · ${chapter.name}` : ""}
+                    {paper.year ? ` · ${paper.year}` : ""}
+                    {items.length
+                      ? ` · ${items.length} question${items.length === 1 ? "" : "s"}`
+                      : ""}
+                  </p>
+                  {view === "questions" ? (
+                    items.length === 0 ? (
+                      <p className="empty-state">
+                        No questions extracted yet. Use <strong>Re-extract</strong> on the paper
+                        list, or set <code>VITE_OPENAI_API_KEY</code> for better results on
+                        bilingual PDFs.
+                      </p>
+                    ) : (
+                      <div className="practise-questions-table-wrap">
+                        <table className="practise-questions-table question-paper-questions-table">
+                          <thead>
+                            <tr>
+                              <th scope="col">#</th>
+                              <th scope="col">Question</th>
+                              <th scope="col">Marks</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {items.map((entry, index) => {
+                              const showSolution = visibleChapterSolutions.has(entry.id);
+                              const hasSolution =
+                                entry.solution && `${entry.solution}`.trim();
+                              return (
+                                <tr key={entry.id}>
+                                  <td className="practise-col-no">{index + 1}</td>
+                                  <td className="practise-col-question">
+                                    <p className="practise-question-text">
+                                      {entry.questionText}
+                                    </p>
+                                    {hasSolution ? (
+                                      <div className="practise-question-solution-wrap">
+                                        <button
+                                          type="button"
+                                          className="practise-solution-link"
+                                          onClick={() =>
+                                            setVisibleChapterSolutions((prev) => {
+                                              const next = new Set(prev);
+                                              if (next.has(entry.id)) next.delete(entry.id);
+                                              else next.add(entry.id);
+                                              return next;
+                                            })
+                                          }
+                                          aria-expanded={showSolution}
+                                        >
+                                          {showSolution ? "Hide solution" : "View solution"}
+                                        </button>
+                                        {showSolution ? (
+                                          <div className="practise-question-solution">
+                                            <p>{entry.solution}</p>
+                                          </div>
+                                        ) : null}
+                                      </div>
+                                    ) : null}
+                                  </td>
+                                  <td className="practise-col-marks">
+                                    {entry.marks != null ? entry.marks : "—"}
+                                  </td>
+                                </tr>
+                              );
+                            })}
+                          </tbody>
+                        </table>
+                      </div>
+                    )
+                  ) : paperHref ? (
+                    <div className="compiled-body question-paper-original-wrap" ref={previewBodyRef}>
+                      <button
+                        type="button"
+                        className="file-window-fullscreen-exit-btn"
+                        title="Exit full screen"
+                        aria-label="Exit full screen"
+                        onClick={exitPreviewFullscreen}
+                      >
+                        <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
+                          <path
+                            fill="currentColor"
+                            d="M18.3 5.71 12 12.01l6.29 6.29 1.42-1.42L14.83 12l4.88-4.88-1.41-1.41zm-13 1.42L10.17 12 5.29 16.88l1.42 1.42L12 13.42l-6.29-6.29-.41.71z"
+                          />
+                        </svg>
+                      </button>
+                      <object
+                        data={paperHref}
+                        type="application/pdf"
+                        className="compiled-pdf question-paper-original-pdf"
+                        title={paper.name}
+                      >
+                        <a href={paperHref} target="_blank" rel="noopener noreferrer">
+                          Open PDF ↗
+                        </a>
+                      </object>
+                    </div>
+                  ) : (
+                    <p className="source-link-muted">Original file preview unavailable.</p>
+                  )}
+                  <div className="compiled-modal-actions">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (
+                          source === "chapterMaterial" &&
+                          unit &&
+                          chapter
+                        ) {
+                          replaceTargetRef.current = {
+                            classId: classItem.id,
+                            unitId: unit.id,
+                            chapterId: chapter.id,
+                            file: previewFileShape(paper),
+                          };
+                        } else {
+                          replaceTargetRef.current = {
+                            kind: "questionPaper",
+                            paper,
+                          };
+                        }
+                        replaceFileInputRef.current?.click();
+                      }}
+                    >
+                      Replace file
+                    </button>
+                  </div>
+                </>
+              );
+            })()}
+          </div>
+        </div>
+      ) : null}
+
       {fileWindowModal ? (
         <div
           className="modal-backdrop"
@@ -3593,14 +3882,6 @@ function MaterialsPage({ user, onSignOut, ownerId }) {
               <button
                 type="button"
                 onClick={() => {
-                  if (fileWindowModal.kind === "questionPaper") {
-                    replaceTargetRef.current = {
-                      kind: "questionPaper",
-                      paper: fileWindowModal.paper,
-                    };
-                    replaceFileInputRef.current?.click();
-                    return;
-                  }
                   void openEditModal(
                     fileWindowModal.classItem.id,
                     fileWindowModal.unit.id,
@@ -3609,8 +3890,7 @@ function MaterialsPage({ user, onSignOut, ownerId }) {
                   );
                 }}
               >
-                {fileWindowModal.kind === "questionPaper" ||
-                !isTextEditableMaterial(fileWindowModal.file)
+                {!isTextEditableMaterial(fileWindowModal.file)
                   ? "Replace file"
                   : "Edit content"}
               </button>
@@ -4136,7 +4416,7 @@ export default function App() {
       email: trimmedEmail,
       password: pwd,
       options: {
-        emailRedirectTo: `${window.location.origin}/dashboard`,
+        emailRedirectTo: authRedirectUrl("/dashboard"),
       },
     });
     setAuthBusy(false);
@@ -4168,7 +4448,7 @@ export default function App() {
     const { error } = await supabase.auth.signInWithOAuth({
       provider: "google",
       options: {
-        redirectTo: `${window.location.origin}/dashboard`,
+        redirectTo: authRedirectUrl("/dashboard"),
       },
     });
     setAuthBusy(false);

@@ -1,12 +1,14 @@
 /** Helpers for question_bank rows and catalog chapter index. */
 
+import { englishOnlyQuestionText } from "./questionExtraction.js";
+
 export function questionBankRowToEntry(row) {
   return {
     id: row.id,
     questionNo: row.question_no,
-    questionText: row.question_text,
+    questionText: englishOnlyQuestionText(row.question_text || ""),
     marks: row.marks != null ? Number(row.marks) : null,
-    solution: row.solution,
+    solution: row.solution ? englishOnlyQuestionText(row.solution) : null,
     source: row.source,
     year: row.year != null ? Number(row.year) : null,
     topic: row.topic,
@@ -72,6 +74,26 @@ export function questionsByChapter(entries, chapterId, { originType } = {}) {
     if (e.chapterId !== chapterId) return false;
     if (originType && e.originType !== originType) return false;
     return true;
+  });
+}
+
+export function questionsByQuestionPaper(entries, paperId) {
+  return entries.filter((e) => e.questionPaperId === paperId);
+}
+
+/** Questions linked to a question-bank paper id or a chapter material file id. */
+export function questionsForPaperOrMaterial(entries, id) {
+  if (!id) return [];
+  return entries.filter(
+    (e) => e.questionPaperId === id || e.materialId === id
+  );
+}
+
+export function sortPaperBankQuestions(entries) {
+  return [...entries].sort((a, b) => {
+    const noA = a.questionNo ?? 99999;
+    const noB = b.questionNo ?? 99999;
+    return noA - noB;
   });
 }
 
