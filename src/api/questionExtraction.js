@@ -2,6 +2,7 @@
 // Uses OpenAI when VITE_OPENAI_API_KEY is set; otherwise PDF/text heuristics.
 
 import * as pdfjs from "pdfjs-dist";
+import { buildExtractionMessages } from "../constants/extractionPrompt.js";
 
 pdfjs.GlobalWorkerOptions.workerSrc = new URL(
   "pdfjs-dist/build/pdf.worker.min.mjs",
@@ -50,12 +51,15 @@ export function looksLikeEnglishQuestionText(text) {
   if (!text || text.length < 12) return false;
   const letters = (text.match(/[A-Za-z]/g) || []).length;
   const nonSpace = text.replace(/\s/g, "").length;
-  if (!nonSpace || letters / nonSpace < 0.45) return false;
+  if (!nonSpace || letters / nonSpace < 0.55) return false;
+  // Reject Hindi custom-font mojibake (à, Ý, Š, º, etc.)
+  const nonAscii = (text.match(/[^\x20-\x7E\n\r\t]/g) || []).length;
+  if (nonAscii > Math.max(2, nonSpace * 0.04)) return false;
   const words = text.match(/[A-Za-z]{3,}/g) || [];
-  if (words.length < 2) return false;
-  const weird = (text.match(/[§$©±¶{}/\\|~<>^&]/g) || []).length;
-  if (weird > 1) return false;
-  return englishReadabilityScore(text) >= 18;
+  if (words.length < 3) return false;
+  const weird = (text.match(/[§$©±¶{}/\\|~<>^&·•`]/g) || []).length;
+  if (weird > 0) return false;
+  return englishReadabilityScore(text) >= 22;
 }
 
 function normalizeQuestion(item, index) {
@@ -85,15 +89,62 @@ function dedupeQuestions(questions) {
   const seen = new Set();
   const out = [];
   for (const q of questions) {
-    const key = `${q.questionNo ?? ""}::${q.questionText.slice(0, 120)}`;
+    const setKey = q.metadata?.set ?? q.metadata?.codeNo ?? "";
+    const key = `${setKey}::${q.questionNo ?? ""}::${q.questionText.slice(0, 120)}`;
     if (seen.has(key)) continue;
     seen.add(key);
     out.push(q);
   }
-  return out.map((q, index) => ({
-    ...q,
-    questionNo: q.questionNo ?? index + 1,
-  }));
+  return out
+    .sort((a, b) => {
+      const setA = `${a.metadata?.series ?? ""}:${a.metadata?.set ?? ""}:${a.metadata?.codeNo ?? ""}`;
+      const setB = `${b.metadata?.series ?? ""}:${b.metadata?.set ?? ""}:${b.metadata?.codeNo ?? ""}`;
+      if (setA !== setB) return setA.localeCompare(setB);
+      const noA = a.questionNo ?? 99999;
+      const noB = b.questionNo ?? 99999;
+      return noA - noB;
+    })
+    .map((q, index) => ({
+      ...q,
+      questionNo: q.questionNo ?? index + 1,
+    }));
+}
+
+function flattenParsedAIResponse(parsed) {
+  if (Array.isArray(parsed)) {
+    return parsed
+      .map((item, index) => normalizeQuestion(item, index))
+      .filter(Boolean)
+      .filter((q) => looksLikeEnglishQuestionText(q.questionText));
+  }
+
+  if (parsed.papers?.length) {
+    const out = [];
+    for (const paper of parsed.papers) {
+      const paperMeta = {
+        set: paper.set ?? null,
+        codeNo: paper.codeNo ?? paper.code_no ?? null,
+        series: paper.series ?? null,
+      };
+      for (const q of paper.questions || []) {
+        const normalized = normalizeQuestion(q, out.length);
+        if (!normalized || !looksLikeEnglishQuestionText(normalized.questionText)) {
+          continue;
+        }
+        out.push({
+          ...normalized,
+          metadata: { ...paperMeta, ...(q.metadata || {}) },
+        });
+      }
+    }
+    return out;
+  }
+
+  const list = parsed.questions || [];
+  return list
+    .map((item, index) => normalizeQuestion(item, index))
+    .filter(Boolean)
+    .filter((q) => looksLikeEnglishQuestionText(q.questionText));
 }
 
 const LINE_Y_TOLERANCE = 4;
@@ -469,10 +520,14 @@ function extractWithHeuristics(text) {
     .slice(0, MAX_QUESTIONS);
 }
 
-async function extractWithOpenAISingle(text, fileName) {
+async function extractWithOpenAISingle(text, fileName, { questionOffset = 0 } = {}) {
   if (!OPENAI_API_KEY) return [];
 
   const trimmed = text.slice(0, AI_CHUNK_SIZE);
+  const offsetHint =
+    questionOffset > 0
+      ? `\n\nNote: questions in this chunk continue from question ${questionOffset + 1}. Preserve printed numbers.`
+      : "";
   const response = await fetch("https://api.openai.com/v1/chat/completions", {
     method: "POST",
     headers: {
@@ -483,17 +538,7 @@ async function extractWithOpenAISingle(text, fileName) {
       model: OPENAI_MODEL,
       temperature: 0.1,
       response_format: { type: "json_object" },
-      messages: [
-        {
-          role: "system",
-          content:
-            'You extract exam questions from teacher question papers. Return JSON: {"questions":[{"questionNo":1,"questionText":"full question text","marks":2,"solution":"answer text or null","topic":null}]}. Extract EVERY numbered question in the text chunk. CBSE papers often print Hindi and English — put questionText and solution in English only; omit Hindi/Devanagari and any garbled symbols. Skip lines that are not valid English. In CBSE papers, marks appear as a number in the right margin of the question row (e.g. "1" means 1 mark) — they may appear in the text as "[1 marks]" tags. Include multiple-choice options (A,B,C,D) inside questionText. Use null for unknown marks or solution. Do not invent content.',
-        },
-        {
-          role: "user",
-          content: `File: ${fileName}\n\nExtract every question from this text:\n\n${trimmed}`,
-        },
-      ],
+      messages: buildExtractionMessages(trimmed + offsetHint, fileName),
     }),
   });
 
@@ -510,11 +555,8 @@ async function extractWithOpenAISingle(text, fileName) {
   } catch {
     return [];
   }
-  const list = Array.isArray(parsed) ? parsed : parsed.questions || [];
-  return list
-    .map((item, index) => normalizeQuestion(item, index))
-    .filter(Boolean)
-    .filter((q) => looksLikeEnglishQuestionText(q.questionText));
+  const list = flattenParsedAIResponse(parsed);
+  return list;
 }
 
 async function extractWithOpenAI(text, fileName) {
@@ -526,9 +568,11 @@ async function extractWithOpenAI(text, fileName) {
 
   const all = [];
   for (let i = 0; i < chunks.length; i += 1) {
+    const maxNo = all.reduce((max, q) => Math.max(max, q.questionNo ?? 0), 0);
     const batch = await extractWithOpenAISingle(
       chunks[i],
-      `${fileName} (section ${i + 1}/${chunks.length})`
+      `${fileName} (pages ${i + 1}/${chunks.length})`,
+      { questionOffset: maxNo }
     );
     all.push(...batch);
   }
@@ -603,6 +647,7 @@ export function assignQuestionIds(questions, extractedBy = "manual") {
     chapterId: q.chapterId ?? null,
     unitId: q.unitId ?? null,
     chapterName: q.chapterName ?? null,
+    metadata: q.metadata ?? {},
     extractedBy,
   }));
 }

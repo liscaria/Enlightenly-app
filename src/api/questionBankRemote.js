@@ -129,7 +129,8 @@ export async function remoteReplaceQuestionBankForMaterial(
   context
 ) {
   if (notReady(ownerId)) return null;
-  await remoteDeleteQuestionBankByMaterial(ownerId, material.id);
+  const deleteError = await remoteDeleteQuestionBankByMaterial(ownerId, material.id);
+  if (deleteError) return deleteError;
   const rows = questionBankRowsFromMaterial(ownerId, material, context);
   if (!rows.length) return null;
   return remoteUpsertQuestionBank(ownerId, rows);
@@ -141,35 +142,44 @@ export async function remoteReplaceQuestionBankForQuestionPaper(
   context
 ) {
   if (notReady(ownerId)) return null;
-  await remoteDeleteQuestionBankByQuestionPaper(ownerId, paper.id);
+  const deleteError = await remoteDeleteQuestionBankByQuestionPaper(ownerId, paper.id);
+  if (deleteError) return deleteError;
   const rows = questionBankRowsFromQuestionPaper(ownerId, paper, context);
   if (!rows.length) return null;
   return remoteUpsertQuestionBank(ownerId, rows);
 }
 
 export async function remoteDeleteQuestionBankByMaterial(ownerId, materialId) {
-  if (notReady(ownerId)) return;
+  if (notReady(ownerId)) return "Not signed in.";
   const { error } = await supabase
     .from("question_bank")
     .delete()
     .eq("owner_id", ownerId)
     .eq("origin_type", "material")
     .eq("material_id", materialId);
-  if (error) warn("deleteByMaterial", error);
+  if (error) {
+    warn("deleteByMaterial", error);
+    return formatError(error);
+  }
+  return null;
 }
 
 export async function remoteDeleteQuestionBankByQuestionPaper(
   ownerId,
   questionPaperId
 ) {
-  if (notReady(ownerId)) return;
+  if (notReady(ownerId)) return "Not signed in.";
   const { error } = await supabase
     .from("question_bank")
     .delete()
     .eq("owner_id", ownerId)
     .eq("origin_type", "question_paper")
     .eq("question_paper_id", questionPaperId);
-  if (error) warn("deleteByQuestionPaper", error);
+  if (error) {
+    warn("deleteByQuestionPaper", error);
+    return formatError(error);
+  }
+  return null;
 }
 
 export async function remoteQueryQuestionBank(ownerId, filters = {}) {

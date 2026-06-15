@@ -2242,6 +2242,9 @@ function MaterialsPage({ user, onSignOut, ownerId }) {
     setMaterialError(null);
     setClassifyingBusy(true);
     try {
+      setQuestionBankEntries((prev) =>
+        prev.filter((entry) => entry.questionPaperId !== paper.id)
+      );
       const sync = await reprocessQuestionPaper(ownerId, paper, catalog, {
         ...questionBankBlobOptions,
         normalizeMaterialCategory,

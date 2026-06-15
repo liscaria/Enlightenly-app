@@ -5,6 +5,7 @@ import { remoteSyncCatalogForClass } from "./materialsRemote.js";
 import {
   remoteReplaceQuestionBankForMaterial,
   remoteReplaceQuestionBankForQuestionPaper,
+  remoteDeleteQuestionBankByQuestionPaper,
   remoteQueryQuestionBank,
   remoteUpsertQuestionBank,
   questionBankRowsFromQuestionPaper,
@@ -384,6 +385,12 @@ export async function reprocessQuestionPapersWithoutBank(
       continue;
     }
 
+    const deleteError = await remoteDeleteQuestionBankByQuestionPaper(ownerId, paper.id);
+    if (deleteError) {
+      lastError = `${paper.name}: could not clear existing questions — ${deleteError}`;
+      continue;
+    }
+
     const sync = await syncQuestionBankFromQuestionPaper(ownerId, paper, file.blob, {
       catalog,
       normalizeMaterialCategory,
@@ -422,6 +429,15 @@ export async function reprocessQuestionPaper(
     remoteDownloadMaterial = null,
   } = {}
 ) {
+  const deleteError = await remoteDeleteQuestionBankByQuestionPaper(ownerId, paper.id);
+  if (deleteError) {
+    return {
+      count: 0,
+      assignedCount: 0,
+      error: `Could not clear existing questions for "${paper.name}": ${deleteError}`,
+    };
+  }
+
   const file = await getQuestionPaperBlob(paper, defaultBlobOptions({
     libraryGet: getBlob,
     librarySaveBlob,
