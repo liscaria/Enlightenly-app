@@ -1,0 +1,22 @@
+{
+  "name": "enlightenly-extraction-api",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "node --watch src/index.js",
+    "start": "node src/index.js",
+    "smoke": "node scripts/smoke-test.mjs",
+    "smoke:health": "node scripts/smoke-test.mjs -- --health",
+    "test:pdf-render": "node scripts/test-pdf-render.mjs",
+    "process-paper": "node scripts/process-paper.mjs"
+  },
+  "dependencies": {
+    "@napi-rs/canvas": "^0.1.65",
+    "@supabase/supabase-js": "^2.45.4",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "pdfjs-dist": "^4.10.38"
+  }
+}
