@@ -9,10 +9,10 @@ Extraction API with no frontend integration yet. Endpoints:
 | Method | Path | Auth | Purpose |
 |--------|------|------|---------|
 | GET | `/health` | No | Liveness + config check |
-| POST | `/papers/:paperId/process` | Bearer JWT | Extract questions, write `extraction_jobs` |
+| POST | `/papers/:paperId/process` | Bearer JWT | Extract questions, write `extraction_jobs` + `question_bank` (Phase 2) |
 | GET | `/jobs/:jobId` | Bearer JWT | Poll job status + quality report |
 
-Phase 1 does **not** write to `question_bank` (Phase 2) or classify chapters (`classifiedBy: "none"`).
+Phase 1 extraction is complete on Railway. **Phase 2** adds `question_bank` persistence (`classifiedBy: "none"`). Chapter classification is Phase 2b.
 
 ### Local setup
 
@@ -36,6 +36,8 @@ curl http://localhost:3000/health
 ```
 
 See **`PHASE1_TESTING.md`** for JWT + `POST /papers/:id/process` curl examples and parity testing.
+
+See **`PHASE2_TESTING.md`** for question_bank persistence verification.
 
 ### Railway deploy
 

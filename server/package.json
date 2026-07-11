@@ -9,7 +9,8 @@
     "smoke": "node scripts/smoke-test.mjs",
     "smoke:health": "node scripts/smoke-test.mjs -- --health",
     "test:pdf-render": "node scripts/test-pdf-render.mjs",
-    "process-paper": "node scripts/process-paper.mjs"
+    "process-paper": "node scripts/process-paper.mjs",
+    "parity-test": "node scripts/parity-test.mjs"
   },
   "dependencies": {
     "@napi-rs/canvas": "^0.1.65",

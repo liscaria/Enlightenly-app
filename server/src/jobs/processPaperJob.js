@@ -1,6 +1,6 @@
 import { config } from "../lib/config.js";
-import { createSupabaseForUser } from "../lib/supabase.js";
 import { log } from "../lib/logger.js";
+import { EXTRACTION_FEATURE_FLAGS } from "../config/extractionConfig.js";
 import {
   extractQuestionsFromDocument,
   assignQuestionIds,
@@ -9,6 +9,7 @@ import {
   buildExtractionQualityReportFromQuestions,
 } from "../extraction/extractionQualityReport.js";
 import { stampPaperExpectedTotal } from "../extraction/paperUtils.js";
+import { persistPaperQuestions } from "./persistPaperQuestions.js";
 
 async function updateJob(supabase, jobId, ownerId, patch) {
   const { error } = await supabase
@@ -22,7 +23,9 @@ async function updateJob(supabase, jobId, ownerId, patch) {
 async function downloadQuestionPaperBlob(supabase, ownerId, paperId) {
   const { data: meta, error: metaError } = await supabase
     .from("question_papers")
-    .select("id, name, mime_type, storage_bucket, storage_path")
+    .select(
+      "id, name, mime_type, storage_bucket, storage_path, class_id, year, paper_source"
+    )
     .eq("owner_id", ownerId)
     .eq("id", paperId)
     .maybeSingle();
@@ -38,13 +41,14 @@ async function downloadQuestionPaperBlob(supabase, ownerId, paperId) {
 
   return {
     blob: data,
+    paper: meta,
     name: meta.name,
     mimeType: meta.mime_type || "application/pdf",
   };
 }
 
 /**
- * Run extraction pipeline and persist job results (Phase 1: no question_bank write).
+ * Run extraction pipeline, persist job results, and optionally write question_bank (Phase 2).
  */
 export async function processPaperJob({
   supabase,
@@ -54,6 +58,7 @@ export async function processPaperJob({
   requestId,
 }) {
   const startedAt = new Date().toISOString();
+  let bankRowCount = 0;
 
   try {
     await updateJob(supabase, jobId, ownerId, {
@@ -94,6 +99,23 @@ export async function processPaperJob({
     await updateJob(supabase, jobId, ownerId, { phase: "saving" });
     log("info", "job.phase", { requestId, jobId, paperId, phase: "saving" });
 
+    if (EXTRACTION_FEATURE_FLAGS.persistToQuestionBank) {
+      const persisted = await persistPaperQuestions({
+        supabase,
+        ownerId,
+        paper: file.paper,
+        questions: enriched,
+        requestId,
+        jobId,
+        paperId,
+      });
+      if (persisted.error) {
+        throw new Error(persisted.error);
+      }
+      bankRowCount = persisted.rowCount;
+      log("info", "job.persisted", { requestId, jobId, paperId, bankRowCount });
+    }
+
     const finishedAt = new Date().toISOString();
     await updateJob(supabase, jobId, ownerId, {
       status: "completed",
@@ -121,6 +143,7 @@ export async function processPaperJob({
       jobId,
       paperId,
       questionCount: enriched.length,
+      bankRowCount,
       extractedBy: result.extractedBy,
       validationStatus: qualityReport?.validationStatus,
     });
@@ -129,6 +152,7 @@ export async function processPaperJob({
       jobId,
       status: "completed",
       questionCount: enriched.length,
+      bankRowCount,
       extractedBy: result.extractedBy,
       classifiedBy: "none",
       qualityReport,
