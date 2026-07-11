@@ -14,8 +14,37 @@ const runHealth = process.argv.includes("--health");
 const port = process.env.PORT || 3000;
 
 const { isOpenAIConfigured } = await import("../src/extraction/questionExtraction.js");
+const { questionBankRowsFromQuestionPaper } = await import("../src/data/questionBankRemote.js");
+const { persistPaperQuestions } = await import("../src/jobs/persistPaperQuestions.js");
+const { EXTRACTION_FEATURE_FLAGS } = await import("../src/config/extractionConfig.js");
+
 console.log("extraction module: ok");
+console.log("persist module: ok");
 console.log("openai configured:", isOpenAIConfigured);
+console.log("persistToQuestionBank:", EXTRACTION_FEATURE_FLAGS.persistToQuestionBank);
+console.log("classifyToChapters:", EXTRACTION_FEATURE_FLAGS.classifyToChapters);
+
+const sampleRows = questionBankRowsFromQuestionPaper(
+  "00000000-0000-0000-0000-000000000001",
+  { id: "paper-1", class_id: "class-xii", paper_source: "Final exam", year: 2026 },
+  {
+    questions: [
+      {
+        id: "11111111-1111-1111-1111-111111111111",
+        questionNo: 1,
+        questionText: "Sample question",
+        marks: 1,
+        extractedBy: "ai",
+      },
+    ],
+  }
+);
+if (sampleRows.length !== 1 || sampleRows[0].origin_type !== "question_paper") {
+  console.error("questionBankRowsFromQuestionPaper smoke failed:", sampleRows);
+  process.exit(1);
+}
+console.log("questionBankRowsFromQuestionPaper: ok");
+void persistPaperQuestions;
 
 if (runHealth) {
   const res = await fetch(`http://localhost:${port}/health`);
