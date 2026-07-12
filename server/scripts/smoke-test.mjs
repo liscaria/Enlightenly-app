@@ -16,13 +16,17 @@ const port = process.env.PORT || 3000;
 const { isOpenAIConfigured } = await import("../src/extraction/questionExtraction.js");
 const { questionBankRowsFromQuestionPaper } = await import("../src/data/questionBankRemote.js");
 const { persistPaperQuestions } = await import("../src/jobs/persistPaperQuestions.js");
+const { classifyPaperQuestions, mergeManualOverridesByQuestionNo } = await import("../src/jobs/classifyPaperQuestions.js");
+const { buildChapterIndexForClass } = await import("../src/data/questionBankUtils.js");
 const { EXTRACTION_FEATURE_FLAGS } = await import("../src/config/extractionConfig.js");
 
 console.log("extraction module: ok");
 console.log("persist module: ok");
+console.log("classify module: ok");
 console.log("openai configured:", isOpenAIConfigured);
 console.log("persistToQuestionBank:", EXTRACTION_FEATURE_FLAGS.persistToQuestionBank);
 console.log("classifyToChapters:", EXTRACTION_FEATURE_FLAGS.classifyToChapters);
+console.log("useVectorClassification:", EXTRACTION_FEATURE_FLAGS.useVectorClassification);
 
 const sampleRows = questionBankRowsFromQuestionPaper(
   "00000000-0000-0000-0000-000000000001",
@@ -45,6 +49,18 @@ if (sampleRows.length !== 1 || sampleRows[0].origin_type !== "question_paper") {
 }
 console.log("questionBankRowsFromQuestionPaper: ok");
 void persistPaperQuestions;
+void classifyPaperQuestions;
+void mergeManualOverridesByQuestionNo;
+
+const chapterIndex = buildChapterIndexForClass(
+  [{ id: "class-1", units: [{ id: "u1", name: "Unit 1", chapters: [{ id: "ch1", name: "Chapter 1" }] }] }],
+  "class-1"
+);
+if (chapterIndex.length !== 1 || chapterIndex[0].id !== "ch1") {
+  console.error("buildChapterIndexForClass smoke failed:", chapterIndex);
+  process.exit(1);
+}
+console.log("buildChapterIndexForClass: ok");
 
 if (runHealth) {
   const res = await fetch(`http://localhost:${port}/health`);

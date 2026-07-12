@@ -5,7 +5,7 @@ export const EXTRACTION_FEATURE_FLAGS = {
   /** Extract answer/solution text from PDFs */
   extractSolutions: false,
   /** Assign questions to syllabus chapters after extraction (Phase 2b) */
-  classifyToChapters: false,
+  classifyToChapters: true,
   /** Use vector KB classification when syllabus embeddings exist (Phase 2b) */
   useVectorClassification: true,
   /** Write extracted questions to question_bank after successful extraction (Phase 2) */

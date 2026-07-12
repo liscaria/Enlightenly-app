@@ -40,6 +40,48 @@ export function buildCatalogForClass({ classes, units, chapters }, classId) {
   ];
 }
 
+import {
+  listMaterials,
+  materialRowToCatalogFile,
+} from "./materialsRemote.js";
+
+/** Attach syllabus/material files to catalog chapters for one class. */
+export function applyMaterialsToCatalog(catalog, materialRows) {
+  const next = catalog.map((c) => ({
+    ...c,
+    units: c.units.map((u) => ({
+      ...u,
+      chapters: u.chapters.map((ch) => ({
+        ...ch,
+        files: [...(ch.files || [])],
+      })),
+    })),
+  }));
+
+  for (const row of materialRows) {
+    const file = materialRowToCatalogFile(row);
+    const classItem = next.find((c) => c.id === row.class_id);
+    const unit = classItem?.units.find((u) => u.id === row.unit_id);
+    const chapter = unit?.chapters.find((ch) => ch.id === row.chapter_id);
+    if (!chapter) continue;
+    if (!chapter.files.some((f) => f.id === file.id)) {
+      chapter.files.push(file);
+    }
+  }
+
+  return next;
+}
+
+/** Load catalog tree + materials for classification (syllabus PDF download). */
+export async function fetchCatalogWithMaterialsForClass(supabase, ownerId, classId) {
+  const structure = await fetchCatalogStructure(supabase, ownerId);
+  const catalog = buildCatalogForClass(structure, classId);
+  if (!catalog.length) return [];
+
+  const materialRows = await listMaterials(supabase, ownerId, { classId });
+  return applyMaterialsToCatalog(catalog, materialRows);
+}
+
 /** Verify class FK parent exists before question_bank insert. */
 export async function ensureClassExists(supabase, ownerId, classId) {
   if (!classId) return "Question paper is missing classId.";

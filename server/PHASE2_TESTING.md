@@ -79,6 +79,4 @@ Refresh the React app — the paper modal should show questions without clicking
 
 ## Phase 2b (next)
 
-- `classifyToChapters: true`
-- Write `question_classifications`
-- Preserve `MANUAL_OVERRIDE` on re-process
+See [`PHASE2B_TESTING.md`](PHASE2B_TESTING.md) — classification + `question_classifications`.

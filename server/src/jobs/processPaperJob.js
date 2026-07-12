@@ -10,6 +10,13 @@ import {
 } from "../extraction/extractionQualityReport.js";
 import { stampPaperExpectedTotal } from "../extraction/paperUtils.js";
 import { persistPaperQuestions } from "./persistPaperQuestions.js";
+import {
+  classifyPaperQuestions,
+  mergeManualOverridesByQuestionNo,
+} from "./classifyPaperQuestions.js";
+import { queryManualOverridesByQuestionNo } from "../data/questionClassificationRemote.js";
+import { fetchCatalogWithMaterialsForClass } from "../data/catalogRemote.js";
+import { buildChapterIndexForClass } from "../data/questionBankUtils.js";
 
 async function updateJob(supabase, jobId, ownerId, patch) {
   const { error } = await supabase
@@ -48,7 +55,7 @@ async function downloadQuestionPaperBlob(supabase, ownerId, paperId) {
 }
 
 /**
- * Run extraction pipeline, persist job results, and optionally write question_bank (Phase 2).
+ * Run extraction pipeline, optionally classify, persist job results and question_bank.
  */
 export async function processPaperJob({
   supabase,
@@ -59,6 +66,8 @@ export async function processPaperJob({
 }) {
   const startedAt = new Date().toISOString();
   let bankRowCount = 0;
+  let assignedCount = 0;
+  let classifiedBy = "none";
 
   try {
     await updateJob(supabase, jobId, ownerId, {
@@ -96,6 +105,44 @@ export async function processPaperJob({
       result.validation
     );
 
+    if (EXTRACTION_FEATURE_FLAGS.classifyToChapters) {
+      await updateJob(supabase, jobId, ownerId, { phase: "classifying" });
+      log("info", "job.phase", { requestId, jobId, paperId, phase: "classifying" });
+
+      const classId = file.paper.class_id;
+      const overridesByQuestionNo = await queryManualOverridesByQuestionNo(
+        supabase,
+        ownerId,
+        paperId
+      );
+
+      const classified = await classifyPaperQuestions({
+        supabase,
+        ownerId,
+        paper: file.paper,
+        questions: enriched,
+        requestId,
+        jobId,
+        paperId,
+      });
+      if (classified.error) {
+        throw new Error(classified.error);
+      }
+
+      const catalog = classId
+        ? await fetchCatalogWithMaterialsForClass(supabase, ownerId, classId)
+        : [];
+      const chapterIndex = buildChapterIndexForClass(catalog, classId);
+
+      enriched = mergeManualOverridesByQuestionNo(
+        classified.questions,
+        overridesByQuestionNo,
+        chapterIndex
+      );
+      classifiedBy = classified.classifiedBy;
+      assignedCount = enriched.filter((q) => q.chapterId).length;
+    }
+
     await updateJob(supabase, jobId, ownerId, { phase: "saving" });
     log("info", "job.phase", { requestId, jobId, paperId, phase: "saving" });
 
@@ -105,6 +152,7 @@ export async function processPaperJob({
         ownerId,
         paper: file.paper,
         questions: enriched,
+        classifiedBy,
         requestId,
         jobId,
         paperId,
@@ -113,7 +161,15 @@ export async function processPaperJob({
         throw new Error(persisted.error);
       }
       bankRowCount = persisted.rowCount;
-      log("info", "job.persisted", { requestId, jobId, paperId, bankRowCount });
+      assignedCount = persisted.assignedCount ?? assignedCount;
+      log("info", "job.persisted", {
+        requestId,
+        jobId,
+        paperId,
+        bankRowCount,
+        assignedCount,
+        classifiedBy,
+      });
     }
 
     const finishedAt = new Date().toISOString();
@@ -121,7 +177,7 @@ export async function processPaperJob({
       status: "completed",
       phase: "completed",
       extracted_by: result.extractedBy || "none",
-      classified_by: "none",
+      classified_by: classifiedBy,
       question_count: enriched.length,
       quality_report: qualityReport,
       error: null,
@@ -144,7 +200,9 @@ export async function processPaperJob({
       paperId,
       questionCount: enriched.length,
       bankRowCount,
+      assignedCount,
       extractedBy: result.extractedBy,
+      classifiedBy,
       validationStatus: qualityReport?.validationStatus,
     });
 
@@ -153,8 +211,9 @@ export async function processPaperJob({
       status: "completed",
       questionCount: enriched.length,
       bankRowCount,
+      assignedCount,
       extractedBy: result.extractedBy,
-      classifiedBy: "none",
+      classifiedBy,
       qualityReport,
       questions: enriched,
     };

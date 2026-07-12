@@ -43,6 +43,7 @@ papersRouter.post("/:paperId/process", async (req, res) => {
       status: result.status,
       questionCount: result.questionCount,
       bankRowCount: result.bankRowCount ?? 0,
+      assignedCount: result.assignedCount ?? 0,
       extractedBy: result.extractedBy,
       classifiedBy: result.classifiedBy,
       qualityReport: result.qualityReport,
