@@ -7,6 +7,12 @@ const OPENAI_MODEL = import.meta.env.VITE_OPENAI_MODEL || "gpt-4o-mini";
 
 const BATCH_SIZE = 15;
 
+export function normalizeChapterConfidence(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return null;
+  return Math.max(0, Math.min(100, Math.round(n)));
+}
+
 function chapterKeyFromName(name) {
   const lower = (name || "").toLowerCase();
   const afterColon = lower.split(":").pop()?.trim() || lower;
@@ -14,26 +20,98 @@ function chapterKeyFromName(name) {
   return afterDash.replace(/^chapter[-\s]*\d+[:.\s]*/i, "").trim();
 }
 
+function chapterNumberFromLabel(label) {
+  const match = (label || "").match(/chapter[-\s]*(\d+)/i);
+  return match ? Number(match[1]) : null;
+}
+
+/** Match AI output to catalog chapter by id, name, or chapter number. */
+export function resolveChapterFromAssignment(assignment, chapterIndex) {
+  if (!assignment || !chapterIndex?.length) return null;
+
+  const byId = new Map(chapterIndex.map((c) => [c.id, c]));
+  const chapterId = assignment.chapterId ?? assignment.chapter_id ?? null;
+  if (chapterId && byId.has(chapterId)) return byId.get(chapterId);
+
+  const rawName = (assignment.chapterName ?? assignment.chapter_name ?? "").trim();
+  if (rawName) {
+    const lower = rawName.toLowerCase();
+    const exact = chapterIndex.find((c) => c.name.toLowerCase() === lower);
+    if (exact) return exact;
+
+    const partial = chapterIndex.find(
+      (c) =>
+        c.name.toLowerCase().includes(lower) || lower.includes(c.name.toLowerCase())
+    );
+    if (partial) return partial;
+  }
+
+  const num =
+    chapterNumberFromLabel(rawName) ??
+    chapterNumberFromLabel(String(chapterId || ""));
+  if (num != null) {
+    const byNum = chapterIndex.find((c) => chapterNumberFromLabel(c.name) === num);
+    if (byNum) return byNum;
+  }
+
+  return null;
+}
+
+function heuristicConfidence(score) {
+  if (!Number.isFinite(score) || score <= 0) return null;
+  return Math.min(88, Math.round(35 + Math.min(score, 40) * 1.2));
+}
+
 function classifyQuestionsHeuristic(questions, chapterIndex) {
   if (!chapterIndex.length) return questions;
+
+  const chapterProfiles = chapterIndex.map((ch) => {
+    const key = chapterKeyFromName(ch.name);
+    const words = key.split(/\W+/).filter((w) => w.length > 3);
+    return { ch, key, words };
+  });
+
   return questions.map((q) => {
     const text = (q.questionText || "").toLowerCase();
     let match = null;
-    let bestLen = 0;
-    for (const ch of chapterIndex) {
-      const key = chapterKeyFromName(ch.name);
-      if (key.length < 4) continue;
-      if (text.includes(key) && key.length > bestLen) {
+    let bestScore = 0;
+
+    for (const { ch, key, words } of chapterProfiles) {
+      if (key.length >= 4 && text.includes(key)) {
+        const score = key.length + 40;
+        if (score > bestScore) {
+          match = ch;
+          bestScore = score;
+        }
+        continue;
+      }
+
+      let wordScore = 0;
+      for (const word of words) {
+        if (text.includes(word)) wordScore += word.length;
+      }
+      if (wordScore > bestScore && wordScore >= 10) {
         match = ch;
-        bestLen = key.length;
+        bestScore = wordScore;
       }
     }
-    if (!match) return q;
+
+    if (!match) {
+      return {
+        ...q,
+        chapterId: null,
+        unitId: null,
+        chapterName: null,
+        chapterConfidence: null,
+      };
+    }
+
     return {
       ...q,
       chapterId: match.id,
       unitId: match.unitId,
       chapterName: match.name,
+      chapterConfidence: heuristicConfidence(bestScore),
     };
   });
 }
@@ -68,22 +146,24 @@ async function classifyBatchWithOpenAI(
         {
           role: "system",
           content: `You classify exam questions into syllabus chapters for a teacher's class.
-Return JSON: {"assignments":[{"questionNo":1,"chapterId":"exact-id-or-null","chapterName":"optional"}]}
+Return JSON: {"assignments":[{"questionNo":1,"chapterId":"copy-exact-id","chapterName":"Chapter-1: ...","confidence":85}]}
 Rules:
-- chapterId MUST be one of the provided chapter ids, or null if truly unknown.
-- Read the syllabus excerpt first: map each question to the chapter whose syllabus topics it tests.
+- chapterId MUST be copied exactly from the "id" field in the Chapters list (e.g. chapter-1734567890). Never invent ids.
+- chapterName should match the catalog chapter name when possible.
+- confidence: integer 0–100 — how sure you are the question belongs in that chapter.
+- Read each chapter's syllabus excerpt first: map each question to the chapter whose syllabus topics it tests.
 - Use question wording (topics, formulas, terminology) when syllabus is ambiguous.
-- Prefer exactly one best-matching chapter; do not invent chapters.
+- Prefer exactly one best-matching chapter; use null chapterId only if truly unknown.
 - Same questionNo as input.`,
         },
         {
           role: "user",
           content: `Exam paper: ${paperName || "question paper"}
 
-Chapters (use these ids only):
+Chapters (copy id exactly into chapterId):
 ${JSON.stringify(chaptersPayload, null, 2)}
 
-${syllabusText ? `Syllabus excerpt:\n${syllabusText.slice(0, 35000)}\n\n` : ""}
+${syllabusText ? `Syllabus by chapter:\n${syllabusText.slice(0, 35000)}\n\n` : "No syllabus text loaded — use chapter names and question topics.\n\n"}
 Questions:
 ${JSON.stringify(questionsPayload, null, 2)}`,
         },
@@ -116,22 +196,30 @@ function applyAssignments(questions, assignments, chapterIndex) {
   const byNo = new Map(
     assignments.map((a) => [Number(a.questionNo ?? a.question_no), a])
   );
-  const chapterById = new Map(chapterIndex.map((c) => [c.id, c]));
 
   return questions.map((q) => {
     const a = byNo.get(Number(q.questionNo));
     if (!a) return q;
-    const chapterId = a.chapterId ?? a.chapter_id ?? null;
-    if (!chapterId) {
-      return { ...q, chapterId: null, unitId: null, chapterName: null };
+
+    const ch = resolveChapterFromAssignment(a, chapterIndex);
+    if (!ch) {
+      return {
+        ...q,
+        chapterId: null,
+        unitId: null,
+        chapterName: null,
+        chapterConfidence: null,
+      };
     }
-    const ch = chapterById.get(chapterId);
-    if (!ch) return q;
+
     return {
       ...q,
       chapterId: ch.id,
       unitId: ch.unitId,
       chapterName: a.chapterName ?? a.chapter_name ?? ch.name,
+      chapterConfidence: normalizeChapterConfidence(
+        a.confidence ?? a.chapterConfidence ?? a.chapter_confidence
+      ),
     };
   });
 }
@@ -195,7 +283,7 @@ export async function collectSyllabusTextForClass(
   { ownerId = null, remoteDownloadMaterial = null } = {}
 ) {
   const classItem = catalog.find((c) => c.id === classId);
-  if (!classItem || !libraryGet) return "";
+  if (!classItem) return "";
 
   const parts = [];
   for (const unit of classItem.units || []) {
@@ -206,10 +294,13 @@ export async function collectSyllabusTextForClass(
           let blob = null;
           let mimeType = file.mimeType;
           let name = file.name;
-          const rec = await libraryGet(file.id);
-          if (rec?.blob) {
-            blob = rec.blob;
-          } else if (ownerId && remoteDownloadMaterial) {
+
+          if (typeof libraryGet === "function") {
+            const rec = await libraryGet(file.id);
+            if (rec?.blob) blob = rec.blob;
+          }
+
+          if (!blob && ownerId && remoteDownloadMaterial) {
             const remote = await remoteDownloadMaterial(ownerId, file.id);
             if (remote?.blob) {
               blob = remote.blob;
@@ -217,10 +308,13 @@ export async function collectSyllabusTextForClass(
               name = remote.name || name;
             }
           }
+
           if (!blob) continue;
           const text = await documentTextFromBlob(blob, mimeType, name);
           if (text.trim()) {
-            parts.push(`## ${chapter.name}\n${text.trim().slice(0, 6000)}`);
+            parts.push(
+              `## ${chapter.name} (chapterId: ${chapter.id})\n${text.trim().slice(0, 6000)}`
+            );
           }
         } catch {
           /* skip unreadable syllabus */

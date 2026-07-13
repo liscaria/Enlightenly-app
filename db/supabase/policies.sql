@@ -7,12 +7,17 @@ alter table public.chapters  enable row level security;
 alter table public.materials enable row level security;
 alter table public.question_bank enable row level security;
 alter table public.question_papers enable row level security;
+alter table public.syllabus_knowledge enable row level security;
+alter table public.chapter_concepts enable row level security;
+alter table public.question_classifications enable row level security;
+alter table public.extraction_jobs enable row level security;
+alter table public.openai_usage_events enable row level security;
 
 do $$
 declare
   t text;
 begin
-  for t in select unnest(array['classes','units','chapters','materials','question_bank','question_papers'])
+  for t in select unnest(array['classes','units','chapters','materials','question_bank','question_papers','syllabus_knowledge','chapter_concepts','question_classifications','extraction_jobs','openai_usage_events'])
   loop
     execute format('drop policy if exists "%I auth full" on public.%I', t, t);
     execute format('drop policy if exists "%I owner" on public.%I', t, t);

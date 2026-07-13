@@ -8,6 +8,7 @@
     "start": "node src/index.js",
     "smoke": "node scripts/smoke-test.mjs",
     "verify:phase2b": "node scripts/verify-phase2b.mjs",
+    "verify:usage": "node scripts/verify-usage-tracking.mjs",
     "smoke:health": "node scripts/smoke-test.mjs -- --health",
     "test:pdf-render": "node scripts/test-pdf-render.mjs",
     "process-paper": "node scripts/process-paper.mjs",

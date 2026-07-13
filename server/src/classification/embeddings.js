@@ -1,4 +1,5 @@
-import { config } from "../lib/config.js";
+import { embeddings as openaiEmbeddings } from "../lib/openaiClient.js";
+import { OPENAI_ACTIONS } from "../lib/openaiUsageAccumulator.js";
 
 const EMBEDDING_MODEL = "text-embedding-3-small";
 const EMBEDDING_DIM = 1536;
@@ -6,54 +7,26 @@ const EMBEDDING_DIM = 1536;
 /**
  * Batch embed texts with text-embedding-3-small (1536 dims).
  * @param {string[]} texts
+ * @param {{ action?: string, usageContext?: object, accumulator?: object, metadata?: object }} [opts]
  * @returns {Promise<{ embeddings: (number[]|null)[], error: string|null }>}
  */
-export async function fetchEmbeddings(texts) {
-  if (!config.openaiApiKey) {
-    return { embeddings: [], error: "OpenAI API key is not configured." };
-  }
-  const inputs = (texts || []).map((t) => (t || "").trim()).filter(Boolean);
-  if (!inputs.length) {
-    return { embeddings: [], error: null };
-  }
+export async function fetchEmbeddings(texts, opts = {}) {
+  const {
+    action = OPENAI_ACTIONS.CLASSIFY_VECTOR,
+    usageContext = null,
+    accumulator = null,
+    metadata = {},
+  } = opts;
 
-  const response = await fetch("https://api.openai.com/v1/embeddings", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${config.openaiApiKey}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      model: EMBEDDING_MODEL,
-      input: inputs,
-      dimensions: EMBEDDING_DIM,
-    }),
+  return openaiEmbeddings({
+    inputs: texts,
+    model: EMBEDDING_MODEL,
+    dimensions: EMBEDDING_DIM,
+    action,
+    usageContext,
+    accumulator,
+    metadata,
   });
-
-  if (!response.ok) {
-    const detail = await response.text();
-    return {
-      embeddings: [],
-      error: `Embedding failed (${response.status}): ${detail.slice(0, 200)}`,
-    };
-  }
-
-  const payload = await response.json();
-  const sorted = (payload?.data || []).sort(
-    (a, b) => (a.index ?? 0) - (b.index ?? 0)
-  );
-  const embeddings = sorted.map((item) => {
-    const vec = item?.embedding;
-    if (!Array.isArray(vec) || vec.length !== EMBEDDING_DIM) return null;
-    return vec;
-  });
-
-  if (embeddings.length !== inputs.length) {
-    return {
-      embeddings: [],
-      error: "Embedding response count mismatch.",
-    };
-  }
-
-  return { embeddings, error: null };
 }
+
+export { EMBEDDING_MODEL, EMBEDDING_DIM };

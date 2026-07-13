@@ -19,6 +19,8 @@ const { persistPaperQuestions } = await import("../src/jobs/persistPaperQuestion
 const { classifyPaperQuestions, mergeManualOverridesByQuestionNo } = await import("../src/jobs/classifyPaperQuestions.js");
 const { buildChapterIndexForClass } = await import("../src/data/questionBankUtils.js");
 const { EXTRACTION_FEATURE_FLAGS } = await import("../src/config/extractionConfig.js");
+const { estimateCostUsd, PRICING_VERSION } = await import("../src/lib/openaiPricing.js");
+const { createUsageAccumulator } = await import("../src/lib/openaiUsageAccumulator.js");
 
 console.log("extraction module: ok");
 console.log("persist module: ok");
@@ -27,6 +29,12 @@ console.log("openai configured:", isOpenAIConfigured);
 console.log("persistToQuestionBank:", EXTRACTION_FEATURE_FLAGS.persistToQuestionBank);
 console.log("classifyToChapters:", EXTRACTION_FEATURE_FLAGS.classifyToChapters);
 console.log("useVectorClassification:", EXTRACTION_FEATURE_FLAGS.useVectorClassification);
+console.log("openai pricing version:", PRICING_VERSION);
+if (estimateCostUsd("gpt-4o-mini", { prompt_tokens: 1000, completion_tokens: 100 }) <= 0) {
+  console.error("estimateCostUsd smoke failed");
+  process.exit(1);
+}
+void createUsageAccumulator;
 
 const sampleRows = questionBankRowsFromQuestionPaper(
   "00000000-0000-0000-0000-000000000001",

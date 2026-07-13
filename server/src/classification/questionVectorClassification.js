@@ -4,6 +4,7 @@ import {
   confidenceToDisplayPercent,
   reviewStatusFromConfidence,
 } from "../constants/classificationReview.js";
+import { OPENAI_ACTIONS } from "../lib/openaiUsageAccumulator.js";
 
 const WEIGHT_TITLE = 0.15;
 const WEIGHT_SUMMARY = 0.35;
@@ -103,7 +104,12 @@ function rankChaptersForQuestion(questionEmbedding, kbProfiles, chapterIndex) {
   };
 }
 
-export async function classifyQuestionsWithVectorKb(questions, kbProfiles, chapterIndex) {
+export async function classifyQuestionsWithVectorKb(
+  questions,
+  kbProfiles,
+  chapterIndex,
+  { usageContext = null, accumulator = null } = {}
+) {
   if (!questions.length || !kbProfiles.length || !chapterIndex.length) {
     return { questions, classifiedBy: "none" };
   }
@@ -113,7 +119,12 @@ export async function classifyQuestionsWithVectorKb(questions, kbProfiles, chapt
 
   for (let i = 0; i < texts.length; i += EMBED_BATCH) {
     const batch = texts.slice(i, i + EMBED_BATCH);
-    const { embeddings, error } = await fetchEmbeddings(batch);
+    const { embeddings, error } = await fetchEmbeddings(batch, {
+      action: OPENAI_ACTIONS.CLASSIFY_VECTOR,
+      usageContext,
+      accumulator,
+      metadata: { batchStart: i },
+    });
     if (error) {
       return { questions, classifiedBy: "none", error };
     }

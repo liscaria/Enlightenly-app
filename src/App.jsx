@@ -24,6 +24,7 @@ import {
   remoteDeleteUnit,
   remoteUpsertChapter,
   remoteDeleteChapter,
+  remoteEnsureCatalogBranch,
 } from "./api/materialsRemote.js";
 import {
   remoteHydrateUserLibrary,
@@ -39,25 +40,48 @@ import {
 } from "./api/questionPapersRemote.js";
 import {
   syncQuestionBankFromMaterial,
-  syncQuestionBankFromQuestionPaper,
   reclassifyUnassignedExamQuestions,
   reclassifyExamPapersForClass,
+  reclassifyQuestionPaperBank,
   reprocessQuestionPapersWithoutBank,
-  reprocessQuestionPaper,
+  updateQuestionBankForPaper,
 } from "./api/syncQuestionBank.js";
-import { remoteQueryQuestionBank } from "./api/questionBankRemote.js";
+import { formatExtractionQualityMessage, isOpenAIConfigured } from "./api/questionExtraction.js";
+import { isExtractionApiConfigured } from "./api/extractionApiConfig.js";
+import { EXTRACTION_FEATURE_FLAGS } from "./constants/extractionConfig.js";
+import QuestionText from "./components/QuestionText.jsx";
+import DifficultyGauge from "./components/DifficultyGauge.jsx";
+import QuestionSolutionCell from "./components/QuestionSolutionCell.jsx";
+import QuestionChapterCell from "./components/QuestionChapterCell.jsx";
+import ExtractionQualityPanel from "./components/ExtractionQualityPanel.jsx";
+import { buildPaperExtractionQualityReport } from "./api/extractionQualityReport.js";
+import { remoteQueryQuestionBank, remoteUpdateQuestionDifficulty } from "./api/questionBankRemote.js";
+import {
+  remoteQueryClassificationsByQuestionIds,
+  remoteOverrideQuestionClassification,
+} from "./api/questionClassificationRemote.js";
+import { confidenceToDisplayPercent } from "./constants/classificationReview.js";
 import {
   questionBankRowToEntry,
   questionsByChapter,
   questionsForPaperOrMaterial,
   sortChapterBankQuestions,
   sortPaperBankQuestions,
+  formatPaperQuestionCount,
+  validatedPaperQuestions,
+  formatQuestionBankSourceLabel,
+  buildChapterIndexForClass,
 } from "./api/questionBankUtils.js";
 import {
   supabase,
   isSupabaseConfigured,
   authRedirectUrl,
 } from "./supabaseClient.js";
+import { buildSyllabusKnowledgeForChapter } from "./api/buildSyllabusKnowledge.js";
+import {
+  remoteQuerySyllabusKnowledge,
+  remoteQueryChapterConceptsByUnit,
+} from "./api/syllabusKnowledgeRemote.js";
 
 const MATERIAL_CATEGORIES = ["Syllabus", "Class Notes", "Question papers"];
 const CHAPTER_MATERIAL_LEFT = ["Class Notes"];
@@ -122,11 +146,16 @@ function emptyQuestionPaperDraft() {
     step: "choose",
     classId: "",
     file: null,
+    solutionFile: null,
     link: "",
     displayName: "",
     paperSource: DEFAULT_QUESTION_PAPER_SOURCE,
     year: String(new Date().getFullYear()),
   };
+}
+
+function questionPaperSolutionStorageId(paperId) {
+  return `${paperId}--solution`;
 }
 
 const MATERIAL_LOCAL_FILE_ACCEPT =
@@ -398,7 +427,7 @@ function DashboardPage({ user, onSignOut }) {
       <header className="topbar">
         <div className="brand">
           <span className="brand-mark">E</span>
-          <span className="brand-name">Enlightly</span>
+          <span className="brand-name">enlightenly</span>
         </div>
         <div className="topbar-actions">
           <button className="signout-btn" type="button" onClick={onSignOut}>
@@ -728,7 +757,7 @@ function MaterialsPage({ user, onSignOut, ownerId }) {
         );
         closeMaterialEditor(unitId);
         if (materialCategory === "Syllabus") {
-          void reclassifyExamPapersAfterSyllabus(classId);
+          void buildSyllabusKnowledgeAfterUpload(classId, unitId, chapterId, id);
         }
       } catch (err) {
         setMaterialError(err.message || "Could not save file.");
@@ -785,7 +814,7 @@ function MaterialsPage({ user, onSignOut, ownerId }) {
         );
         closeMaterialEditor(unitId);
         if (materialCategory === "Syllabus") {
-          void reclassifyExamPapersAfterSyllabus(classId);
+          void buildSyllabusKnowledgeAfterUpload(classId, unitId, chapterId, id);
         }
       } catch (err) {
         setMaterialError(
@@ -808,15 +837,43 @@ function MaterialsPage({ user, onSignOut, ownerId }) {
   const [visibleChapterSolutions, setVisibleChapterSolutions] = useState(
     () => new Set()
   );
-  const [classifyingBusy, setClassifyingBusy] = useState(false);
+  const [updatingQuestionBankBusy, setUpdatingQuestionBankBusy] = useState(false);
   const [libraryHydrating, setLibraryHydrating] = useState(false);
+  const [syllabusKnowledgeByChapterId, setSyllabusKnowledgeByChapterId] = useState({});
+  const [syllabusKnowledgeModal, setSyllabusKnowledgeModal] = useState(null);
   const questionPaperPickRef = useRef(false);
+  const questionPaperSolutionPickRef = useRef(false);
   const questionPaperLocalInputRef = useRef(null);
+  const questionPaperSolutionInputRef = useRef(null);
 
   const qbPapersKey = questionBankPapersStorageKey(ownerId);
 
   useEffect(() => {
     setLibraryOwnerId(ownerId);
+  }, [ownerId]);
+
+  const refreshSyllabusKnowledge = async (classId) => {
+    if (!ownerId || !isSupabaseConfigured) return;
+    const rows = await remoteQuerySyllabusKnowledge(
+      ownerId,
+      classId ? { classId } : {}
+    );
+    setSyllabusKnowledgeByChapterId((prev) => {
+      const next = classId ? { ...prev } : {};
+      for (const row of rows) {
+        next[row.chapterId] = row;
+      }
+      return next;
+    });
+  };
+
+  useEffect(() => {
+    if (!ownerId || !isSupabaseConfigured) {
+      setSyllabusKnowledgeByChapterId({});
+      return undefined;
+    }
+    void refreshSyllabusKnowledge();
+    return undefined;
   }, [ownerId]);
 
   useEffect(() => {
@@ -843,14 +900,30 @@ function MaterialsPage({ user, onSignOut, ownerId }) {
         const mergedPapers = mergeQuestionPaperLists(savedPapers, questionPapers);
         setQuestionBankPapers(mergedPapers);
         const entries = (qbRows || []).map(questionBankRowToEntry);
-        setQuestionBankEntries(entries);
+        const clsMap = await remoteQueryClassificationsByQuestionIds(
+          ownerId,
+          entries.map((e) => e.id)
+        );
+        setQuestionBankEntries(
+          entries.map((entry) => {
+            const cls = clsMap[entry.id];
+            if (!cls) return entry;
+            return {
+              ...entry,
+              chapterConfidence: confidenceToDisplayPercent(cls.confidence),
+              classificationAlternatives: cls.alternatives,
+              reviewStatus: cls.reviewStatus,
+              classificationSource: cls.classificationSource,
+            };
+          })
+        );
         setLibraryHydrating(false);
         if (error) {
           setMaterialError(`Some library data could not be synced: ${error}`);
         }
 
-        if (mergedPapers.length) {
-          setClassifyingBusy(true);
+        if (mergedPapers.length && EXTRACTION_FEATURE_FLAGS.autoExtractOnLoad) {
+          setUpdatingQuestionBankBusy(true);
           try {
             const reprocess = await reprocessQuestionPapersWithoutBank(
               ownerId,
@@ -885,7 +958,7 @@ function MaterialsPage({ user, onSignOut, ownerId }) {
           } catch (err) {
             console.warn("[reprocessQuestionPapers]", err);
           } finally {
-            if (!cancelled) setClassifyingBusy(false);
+            if (!cancelled) setUpdatingQuestionBankBusy(false);
           }
         }
       }
@@ -1023,13 +1096,20 @@ function MaterialsPage({ user, onSignOut, ownerId }) {
 
   const questionCountByPaperId = useMemo(() => {
     const map = {};
-    for (const entry of questionBankEntries) {
-      if (entry.questionPaperId) {
-        map[entry.questionPaperId] = (map[entry.questionPaperId] || 0) + 1;
-      }
+    for (const paper of questionBankPapers) {
+      const label = formatPaperQuestionCount(questionBankEntries, paper.id);
+      if (label) map[paper.id] = label;
     }
     return map;
-  }, [questionBankEntries]);
+  }, [questionBankEntries, questionBankPapers]);
+
+  const extractionQualityByPaperId = useMemo(() => {
+    const map = {};
+    for (const paper of questionBankPapers) {
+      map[paper.id] = buildPaperExtractionQualityReport(questionBankEntries, paper.id);
+    }
+    return map;
+  }, [questionBankEntries, questionBankPapers]);
 
   const questionBankBlobOptions = {
     libraryGet,
@@ -1040,7 +1120,102 @@ function MaterialsPage({ user, onSignOut, ownerId }) {
   const refreshQuestionBankEntries = async () => {
     if (!ownerId || !isSupabaseConfigured) return;
     const rows = await remoteQueryQuestionBank(ownerId, {});
-    setQuestionBankEntries(rows.map(questionBankRowToEntry));
+    const ids = rows.map((r) => r.id);
+    const clsMap = await remoteQueryClassificationsByQuestionIds(ownerId, ids);
+    setQuestionBankEntries(
+      rows.map((row) => {
+        const entry = questionBankRowToEntry(row);
+        const cls = clsMap[row.id];
+        if (cls) {
+          entry.chapterConfidence = confidenceToDisplayPercent(cls.confidence);
+          entry.classificationAlternatives = cls.alternatives;
+          entry.reviewStatus = cls.reviewStatus;
+          entry.classificationSource = cls.classificationSource;
+        }
+        return entry;
+      })
+    );
+  };
+
+  const updateQuestionChapter = async (questionId, chapterId, classId) => {
+    if (!ownerId) {
+      setMaterialError("Sign in to change chapter assignment.");
+      return;
+    }
+    const entry = questionBankEntries.find((e) => e.id === questionId);
+    const chapterIndex = buildChapterIndexForClass(catalog, classId || entry?.classId);
+    const chapter = chapterIndex.find((c) => c.id === chapterId);
+    if (!entry || !chapter) return;
+
+    const previous = {
+      chapterId: entry.chapterId,
+      chapterName: entry.chapterName,
+      unitId: entry.unitId,
+      chapterConfidence: entry.chapterConfidence,
+    };
+
+    setQuestionBankEntries((prev) =>
+      prev.map((e) =>
+        e.id === questionId
+          ? {
+              ...e,
+              chapterId: chapter.id,
+              chapterName: chapter.name,
+              unitId: chapter.unitId,
+              chapterConfidence: 100,
+              reviewStatus: "AUTO_APPROVED",
+              classificationSource: "MANUAL_OVERRIDE",
+            }
+          : e
+      )
+    );
+
+    const err = await remoteOverrideQuestionClassification(ownerId, questionId, {
+      chapterId: chapter.id,
+      chapterName: chapter.name,
+      unitId: chapter.unitId,
+      previousClassification: {
+        alternatives: entry.classificationAlternatives ?? [],
+      },
+    });
+
+    if (err) {
+      setQuestionBankEntries((prev) =>
+        prev.map((e) => (e.id === questionId ? { ...e, ...previous } : e))
+      );
+      setMaterialError(`Could not save chapter: ${err}`);
+    }
+  };
+
+  const updateQuestionDifficulty = async (questionId, difficultyLevel) => {
+    if (!ownerId) {
+      setMaterialError("Sign in to rate question difficulty.");
+      return;
+    }
+    const previous = questionBankEntries.find((e) => e.id === questionId)?.difficultyLevel;
+    setQuestionBankEntries((prev) =>
+      prev.map((e) =>
+        e.id === questionId ? { ...e, difficultyLevel } : e
+      )
+    );
+    const err = await remoteUpdateQuestionDifficulty(ownerId, questionId, difficultyLevel);
+    if (err) {
+      setQuestionBankEntries((prev) =>
+        prev.map((e) =>
+          e.id === questionId ? { ...e, difficultyLevel: previous } : e
+        )
+      );
+      setMaterialError(`Could not save difficulty: ${err}`);
+    }
+  };
+
+  const toggleQuestionSolution = (questionId) => {
+    setVisibleChapterSolutions((prev) => {
+      const next = new Set(prev);
+      if (next.has(questionId)) next.delete(questionId);
+      else next.add(questionId);
+      return next;
+    });
   };
 
   const runExamChapterClassification = async (
@@ -1075,9 +1250,10 @@ function MaterialsPage({ user, onSignOut, ownerId }) {
   };
 
   const reclassifyExamPapersAfterSyllabus = async (classId) => {
+    if (!EXTRACTION_FEATURE_FLAGS.classifyToChapters) return;
     const papersForClass = questionBankPapers.filter((p) => p.classId === classId);
     if (!papersForClass.length || !ownerId) return;
-    setClassifyingBusy(true);
+    setUpdatingQuestionBankBusy(true);
     try {
       const wrapped = await runExamChapterClassification(papersForClass, { classId });
       const result = wrapped?.result;
@@ -1093,8 +1269,157 @@ function MaterialsPage({ user, onSignOut, ownerId }) {
     } catch (err) {
       console.warn("[reclassifyExamPapersAfterSyllabus]", err);
     } finally {
-      setClassifyingBusy(false);
+      setUpdatingQuestionBankBusy(false);
     }
+  };
+
+  const buildSyllabusKnowledgeAfterUpload = async (
+    classId,
+    unitId,
+    chapterId,
+    materialId
+  ) => {
+    if (!ownerId) return;
+    const classItem = catalog.find((c) => c.id === classId);
+    const unit = classItem?.units?.find((u) => u.id === unitId);
+    const chapter = unit?.chapters?.find((ch) => ch.id === chapterId);
+    if (!chapter) return;
+
+    setSyllabusKnowledgeByChapterId((prev) => ({
+      ...prev,
+      [chapterId]: {
+        ...(prev[chapterId] || {}),
+        chapterId,
+        extractStatus: "pending",
+        mismatchWarning: false,
+        conceptCount: 0,
+        extractError: null,
+      },
+    }));
+    setLibraryNotice(
+      isExtractionApiConfigured()
+        ? `Building chapter knowledge for "${chapter.name}" on server…`
+        : `Building chapter knowledge for "${chapter.name}"…`
+    );
+
+    try {
+      const result = await buildSyllabusKnowledgeForChapter(ownerId, {
+        catalog,
+        classId,
+        unitId,
+        chapterId,
+        chapterName: chapter.name,
+        materialId,
+        libraryGet,
+        remoteDownloadMaterial: remoteDownloadMaterialBlob,
+        remoteEnsureCatalogBranch,
+      });
+
+      await refreshSyllabusKnowledge(classId);
+
+      if (result.status === "complete") {
+        if (result.mismatchWarning) {
+          setLibraryNotice(
+            `Knowledge ready for "${chapter.name}" — content may not match this chapter.`
+          );
+        } else {
+          setLibraryNotice(
+            `Knowledge ready for "${chapter.name}" · ${result.conceptCount} concept${result.conceptCount === 1 ? "" : "s"}.`
+          );
+        }
+        void reclassifyExamPapersAfterSyllabus(classId);
+        if (
+          syllabusKnowledgeModal?.classItem?.id === classId &&
+          syllabusKnowledgeModal?.unit?.id === unitId
+        ) {
+          void openSyllabusKnowledgeModal(classItem, unit);
+        }
+      } else {
+        setLibraryNotice(null);
+        setMaterialError(
+          result.error ||
+            `Knowledge build failed for "${chapter.name}". Upload a text-based syllabus PDF.`
+        );
+      }
+    } catch (err) {
+      console.warn("[buildSyllabusKnowledgeAfterUpload]", err);
+      setLibraryNotice(null);
+      setMaterialError(
+        err?.message || `Knowledge build failed for "${chapter.name}".`
+      );
+      await refreshSyllabusKnowledge(classId);
+    }
+  };
+
+  const openSyllabusKnowledgeModal = async (classItem, unit) => {
+    if (!ownerId) {
+      setMaterialError("Sign in to view syllabus knowledge.");
+      return;
+    }
+    setSyllabusKnowledgeModal({ classItem, unit, loading: true, conceptsByChapterId: {} });
+    const concepts = await remoteQueryChapterConceptsByUnit(ownerId, unit.id);
+    const conceptsByChapterId = {};
+    for (const row of concepts) {
+      if (!conceptsByChapterId[row.chapterId]) {
+        conceptsByChapterId[row.chapterId] = [];
+      }
+      conceptsByChapterId[row.chapterId].push(row.conceptName);
+    }
+    setSyllabusKnowledgeModal({ classItem, unit, loading: false, conceptsByChapterId });
+  };
+
+  const renderSyllabusKnowledgeStatus = (
+    classId,
+    unitId,
+    chapter,
+    syllabusFiles
+  ) => {
+    if (!syllabusFiles.length) return null;
+    const kb = syllabusKnowledgeByChapterId[chapter.id];
+    const status = kb?.extractStatus;
+    const latestMaterialId = syllabusFiles[syllabusFiles.length - 1]?.id;
+
+    return (
+      <div className="syllabus-kb-row">
+        {status ? (
+          <span
+            className={`syllabus-kb-status syllabus-kb-status--${status}${
+              status === "complete" && kb.mismatchWarning
+                ? " syllabus-kb-status--warn"
+                : ""
+            }`}
+            title={
+              status === "failed" && kb.extractError ? kb.extractError : undefined
+            }
+          >
+            {status === "pending" && "Building knowledge…"}
+            {status === "complete" &&
+              !kb.mismatchWarning &&
+              `Knowledge ready · ${kb.conceptCount} concept${kb.conceptCount === 1 ? "" : "s"}`}
+            {status === "complete" &&
+              kb.mismatchWarning &&
+              "Knowledge ready · content may not match chapter"}
+            {status === "failed" && "Knowledge build failed"}
+          </span>
+        ) : null}
+        {latestMaterialId ? (
+          <button
+            type="button"
+            className="syllabus-kb-rebuild-btn"
+            onClick={() =>
+              void buildSyllabusKnowledgeAfterUpload(
+                classId,
+                unitId,
+                chapter.id,
+                latestMaterialId
+              )
+            }
+          >
+            {status === "pending" ? "Retry" : "Rebuild"}
+          </button>
+        ) : null}
+      </div>
+    );
   };
 
   const hrefFor = (file) => urlByLibraryId[file?.id] || file?.link || null;
@@ -2061,6 +2386,43 @@ function MaterialsPage({ user, onSignOut, ownerId }) {
     }));
   };
 
+  const triggerQuestionPaperSolutionPicker = () => {
+    questionPaperSolutionPickRef.current = true;
+    requestAnimationFrame(() => questionPaperSolutionInputRef.current?.click());
+  };
+
+  const onQuestionPaperSolutionFilePicked = (event) => {
+    if (!questionPaperSolutionPickRef.current) return;
+    questionPaperSolutionPickRef.current = false;
+    const file = event.target.files?.[0] ?? null;
+    event.target.value = "";
+    if (!file) return;
+    setQuestionPaperDraft((prev) => ({
+      ...(prev || emptyQuestionPaperDraft()),
+      solutionFile: file,
+    }));
+  };
+
+  const renderQuestionPaperSolutionField = (draft) => (
+    <label className="document-field">
+      <span>Solution file (optional)</span>
+      <div className="question-paper-solution-row">
+        <button
+          type="button"
+          className="document-choice-btn"
+          onClick={triggerQuestionPaperSolutionPicker}
+        >
+          {draft.solutionFile ? "Change solution file" : "Add solution PDF"}
+        </button>
+        {draft.solutionFile ? (
+          <span className="inline-muted">{draft.solutionFile.name}</span>
+        ) : (
+          <span className="inline-muted">Stored for later — not extracted yet</span>
+        )}
+      </div>
+    </label>
+  );
+
   const renderQuestionPaperMetaFields = (draft, { disableFileFields = false } = {}) => (
     <>
       <div
@@ -2158,6 +2520,12 @@ function MaterialsPage({ user, onSignOut, ownerId }) {
 
       const id = newLibraryId();
       await librarySaveBlob(id, blob, { name, mimeType });
+      if (draft.solutionFile) {
+        await librarySaveBlob(questionPaperSolutionStorageId(id), draft.solutionFile, {
+          name: draft.solutionFile.name,
+          mimeType: draft.solutionFile.type || "application/octet-stream",
+        });
+      }
 
       const paper = {
         id,
@@ -2169,6 +2537,7 @@ function MaterialsPage({ user, onSignOut, ownerId }) {
         fileType,
         mimeType,
         source,
+        hasSolution: Boolean(draft.solutionFile),
         storedAt: new Date().toISOString(),
       };
 
@@ -2185,7 +2554,12 @@ function MaterialsPage({ user, onSignOut, ownerId }) {
           source,
         },
         blob,
-        catalog
+        catalog,
+        {
+          solutionBlob: draft.solutionFile,
+          solutionName: draft.solutionFile?.name,
+          solutionMimeType: draft.solutionFile?.type,
+        }
       );
 
       setQuestionBankPapers((prev) => [paper, ...prev]);
@@ -2196,35 +2570,9 @@ function MaterialsPage({ user, onSignOut, ownerId }) {
         setMaterialError(
           `Saved on this device, but cloud sync failed: ${remoteError}`
         );
-      }
-
-      setLibraryNotice(null);
-      const sync = await syncQuestionBankFromQuestionPaper(ownerId, paper, blob, {
-        remoteOk: !remoteError,
-        catalog,
-        normalizeMaterialCategory,
-        remoteDownloadMaterial: remoteDownloadMaterialBlob,
-      });
-      await refreshQuestionBankEntries();
-      if (sync.error) {
-        setMaterialError(
-          `Paper saved, but question bank update failed: ${sync.error}`
-        );
-      } else if (sync.count > 0) {
-        const assigned = sync.assignedCount ?? 0;
-        const chapterNote =
-          assigned > 0
-            ? `; ${assigned} assigned to chapters (${sync.classifiedBy})`
-            : import.meta.env.VITE_OPENAI_API_KEY
-              ? ". Add syllabus PDFs per chapter to improve chapter matching"
-              : ". Set VITE_OPENAI_API_KEY for AI extraction and classification; add syllabus PDFs per chapter";
-        const dbNote = sync.error ? "" : " Saved to question bank.";
+      } else {
         setLibraryNotice(
-          `Added ${sync.count} question${sync.count === 1 ? "" : "s"} (${sync.extractedBy})${chapterNote}.${dbNote}`
-        );
-      } else if (sync.count === 0 && !sync.error) {
-        setLibraryNotice(
-          "Paper saved. No questions could be read from this file yet — set VITE_OPENAI_API_KEY in .env.local for AI extraction."
+          `Saved "${name}". Click Update question bank on the paper to extract questions and marks.`
         );
       }
     } catch (err) {
@@ -2234,38 +2582,100 @@ function MaterialsPage({ user, onSignOut, ownerId }) {
     }
   };
 
-  const reextractQuestionPaper = async (paper) => {
+  const updateQuestionBank = async (paper) => {
     if (!ownerId) {
       setMaterialError("Sign in to extract questions.");
       return;
     }
     setMaterialError(null);
-    setClassifyingBusy(true);
+    setUpdatingQuestionBankBusy(true);
+    if (isExtractionApiConfigured()) {
+      setLibraryNotice(
+        `Processing "${paper.name}" on server — this may take several minutes…`
+      );
+    }
     try {
       setQuestionBankEntries((prev) =>
         prev.filter((entry) => entry.questionPaperId !== paper.id)
       );
-      const sync = await reprocessQuestionPaper(ownerId, paper, catalog, {
+      const sync = await updateQuestionBankForPaper(ownerId, paper, catalog, {
         ...questionBankBlobOptions,
         normalizeMaterialCategory,
         remoteDownloadMaterial: remoteDownloadMaterialBlob,
       });
       await refreshQuestionBankEntries();
       if (sync.error) {
-        setMaterialError(`Re-extract failed for "${paper.name}": ${sync.error}`);
+        setMaterialError(`Update question bank failed for "${paper.name}": ${sync.error}`);
       } else if (sync.count > 0) {
+        const qualityNote = sync.quality
+          ? formatExtractionQualityMessage(sync.quality)
+          : "";
+        const validationNote = sync.validationNote || "";
+        const reviewNote = sync.qualityReport?.validationStatus === "Passed"
+          ? " Validation passed."
+          : "";
+        const chapterNote =
+          sync.assignedCount > 0
+            ? ` ${sync.assignedCount} classified to chapters (${sync.classifiedBy}).`
+            : EXTRACTION_FEATURE_FLAGS.classifyToChapters
+              ? " Upload syllabus PDFs per chapter to classify questions."
+              : "";
         setLibraryNotice(
-          `Re-extracted ${sync.count} question${sync.count === 1 ? "" : "s"} from "${paper.name}" (${sync.extractedBy}).`
+          `Updated question bank for "${paper.name}": ${sync.count} question${sync.count === 1 ? "" : "s"} (${sync.extractedBy}).${chapterNote}${qualityNote}${validationNote}${reviewNote}`
         );
       } else {
-        setMaterialError(
-          `No questions could be read from "${paper.name}". Set VITE_OPENAI_API_KEY in .env.local for AI extraction.`
-        );
+        const detail =
+          sync.error ||
+          (isExtractionApiConfigured()
+            ? "Check that the paper is synced to cloud storage and the extraction API is reachable."
+            : isOpenAIConfigured
+              ? "The PDF may have no readable text, or OpenAI returned no valid English questions. Check the browser console, try gpt-4o in VITE_OPENAI_MODEL, then Update question bank again."
+              : "VITE_OPENAI_API_KEY is not loaded. Save .env.local, add VITE_OPENAI_API_KEY=sk-..., then restart npm run dev (Vite only reads env vars at startup).");
+        setMaterialError(`No questions could be read from "${paper.name}". ${detail}`);
       }
     } catch (err) {
-      setMaterialError(err.message || "Could not re-extract questions.");
+      setMaterialError(err.message || "Could not update question bank.");
     } finally {
-      setClassifyingBusy(false);
+      setUpdatingQuestionBankBusy(false);
+    }
+  };
+
+  const classifyQuestionPaperChapters = async (paper) => {
+    if (!ownerId) {
+      setMaterialError("Sign in to classify questions.");
+      return;
+    }
+    if (!EXTRACTION_FEATURE_FLAGS.classifyToChapters) return;
+    setMaterialError(null);
+    setUpdatingQuestionBankBusy(true);
+    if (isExtractionApiConfigured()) {
+      setLibraryNotice(
+        `Classifying "${paper.name}" on server — this may take a few minutes…`
+      );
+    }
+    try {
+      const result = await reclassifyQuestionPaperBank(ownerId, paper, catalog, {
+        ...questionBankBlobOptions,
+        normalizeMaterialCategory,
+        remoteDownloadMaterial: remoteDownloadMaterialBlob,
+      });
+      await refreshQuestionBankEntries();
+      if (result.error) {
+        setMaterialError(`Chapter classification failed for "${paper.name}": ${result.error}`);
+      } else if (result.assignedCount > 0) {
+        setLibraryNotice(
+          `Classified ${result.assignedCount} of ${result.count} questions on "${paper.name}" (${result.classifiedBy}).`
+        );
+      } else {
+        const detail = isExtractionApiConfigured()
+          ? "Upload syllabus PDFs under each chapter, then try again."
+          : "Upload syllabus PDFs under each chapter and ensure VITE_OPENAI_API_KEY is set, then try again.";
+        setMaterialError(`No chapters assigned for "${paper.name}". ${detail}`);
+      }
+    } catch (err) {
+      setMaterialError(err.message || "Could not classify questions to chapters.");
+    } finally {
+      setUpdatingQuestionBankBusy(false);
     }
   };
 
@@ -2280,10 +2690,14 @@ function MaterialsPage({ user, onSignOut, ownerId }) {
     }
     try {
       await libraryDelete(paper.id);
+      await libraryDelete(questionPaperSolutionStorageId(paper.id));
     } catch {
       /* may not exist locally */
     }
     setQuestionBankPapers((prev) => prev.filter((p) => p.id !== paper.id));
+    setQuestionBankEntries((prev) =>
+      prev.filter((entry) => entry.questionPaperId !== paper.id)
+    );
     setQuestionPaperModal((prev) =>
       prev?.paper?.id === paper.id ? null : prev
     );
@@ -2295,6 +2709,10 @@ function MaterialsPage({ user, onSignOut, ownerId }) {
       delete next[paper.id];
       return next;
     });
+    if (ownerId && isSupabaseConfigured) {
+      await refreshQuestionBankEntries();
+    }
+    setLibraryNotice(`Deleted "${paper.name}".`);
   };
 
   const toggleChapterEditor = (unitId) => {
@@ -2326,7 +2744,7 @@ function MaterialsPage({ user, onSignOut, ownerId }) {
       <header className="topbar">
         <div className="brand">
           <span className="brand-mark">E</span>
-          <span className="brand-name">Enlightly</span>
+          <span className="brand-name">enlightenly</span>
         </div>
         <div className="topbar-actions">
           <button className="signout-btn" type="button" onClick={onSignOut}>
@@ -2391,6 +2809,16 @@ function MaterialsPage({ user, onSignOut, ownerId }) {
         tabIndex={-1}
         accept={MATERIAL_LOCAL_FILE_ACCEPT}
         onChange={onQuestionPaperLocalFilePicked}
+      />
+
+      <input
+        ref={questionPaperSolutionInputRef}
+        type="file"
+        className="visually-hidden"
+        aria-hidden
+        tabIndex={-1}
+        accept=".pdf,application/pdf"
+        onChange={onQuestionPaperSolutionFilePicked}
       />
 
       <section className="materials-layout">
@@ -2555,10 +2983,20 @@ function MaterialsPage({ user, onSignOut, ownerId }) {
                             {unit.name} - {unit.title}
                           </span>
                         </button>
-                        <div className="unit-marks-wrap">
+                        <div className="unit-header-actions">
                           {unit.marks != null && unit.marks !== "" ? (
                             <span className="unit-marks">{unit.marks} marks</span>
                           ) : null}
+                          <button
+                            type="button"
+                            className="syllabus-knowledge-view-btn"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              void openSyllabusKnowledgeModal(classItem, unit);
+                            }}
+                          >
+                            Syllabus knowledge
+                          </button>
                         </div>
                       </div>
 
@@ -3011,6 +3449,12 @@ function MaterialsPage({ user, onSignOut, ownerId }) {
                                         <h5 className="chapter-category-heading">
                                           Syllabus
                                         </h5>
+                                        {renderSyllabusKnowledgeStatus(
+                                          classItem.id,
+                                          unit.id,
+                                          chapter,
+                                          syllabusFiles
+                                        )}
                                         {renderChapterMaterialFiles(
                                           classItem,
                                           unit,
@@ -3125,11 +3569,21 @@ function MaterialsPage({ user, onSignOut, ownerId }) {
             </div>
           </div>
           <p className="auth-hint question-bank-hint">
-            Upload exam papers here. Each paper is saved to the database, questions are extracted
-            (with marks and solutions when present), and classified to chapters. Add syllabus PDFs
-            under each chapter for best classification. View questions per chapter via{" "}
-            <em>Practise questions</em>. Set <code>VITE_OPENAI_API_KEY</code> in{" "}
-            <code>.env.local</code> for AI extraction and classification.
+            Upload exam question papers here (optionally attach a solution PDF for later).
+            Click <strong>Update question bank</strong> to extract questions, marks, and source
+            into a structured table. Toggle between the original PDF and extracted questions when
+            you open a paper. Questions are classified into chapters using uploaded syllabus PDFs.
+            {isExtractionApiConfigured() ? (
+              <>
+                {" "}
+                Extraction and chapter classification run on the server when the API is enabled.
+              </>
+            ) : (
+              <>
+                {" "}
+                Set <code>VITE_OPENAI_API_KEY</code> in <code>.env.local</code> for AI extraction.
+              </>
+            )}
           </p>
 
           {questionPaperEditorOpen && questionPaperDraft ? (
@@ -3204,6 +3658,7 @@ function MaterialsPage({ user, onSignOut, ownerId }) {
                     />
                   </label>
                   {renderQuestionPaperMetaFields(questionPaperDraft)}
+                  {renderQuestionPaperSolutionField(questionPaperDraft)}
                   <div className="document-form-actions">
                     <button
                       type="button"
@@ -3246,6 +3701,7 @@ function MaterialsPage({ user, onSignOut, ownerId }) {
                     />
                   </label>
                   {renderQuestionPaperMetaFields(questionPaperDraft)}
+                  {renderQuestionPaperSolutionField(questionPaperDraft)}
                   <div className="document-form-actions">
                     <button
                       type="button"
@@ -3309,40 +3765,50 @@ function MaterialsPage({ user, onSignOut, ownerId }) {
                         </h4>
                         <ul className="chapter-sources question-paper-list">
                           {sourceGroup.papers.map((p) => (
-                            <li key={p.id} className="source-item">
-                              <div className="source-row-main">
-                                <button
-                                  type="button"
-                                  className="source-name-btn"
-                                  onClick={() =>
-                                    openQuestionPaperFileWindow(p, {
-                                      id: classGroup.classId,
-                                      name: classGroup.className,
-                                    })
-                                  }
-                                >
-                                  {p.name}
-                                </button>
-                                <span className="question-paper-meta">
-                                  {p.year}
-                                  {questionCountByPaperId[p.id]
-                                    ? ` · ${questionCountByPaperId[p.id]} questions`
-                                    : classifyingBusy
-                                      ? " · processing…"
-                                      : " · no questions yet"}
-                                </span>
+                            <li key={p.id} className="source-item question-paper-row">
+                              <button
+                                type="button"
+                                className="question-paper-filename source-name-btn"
+                                title={p.name}
+                                onClick={() =>
+                                  openQuestionPaperFileWindow(p, {
+                                    id: classGroup.classId,
+                                    name: classGroup.className,
+                                  })
+                                }
+                              >
+                                {p.name}
+                              </button>
+                              <span className="question-paper-meta">
+                                {p.year}
+                                {questionCountByPaperId[p.id]
+                                  ? ` · ${questionCountByPaperId[p.id]}`
+                                  : updatingQuestionBankBusy
+                                    ? " · processing…"
+                                    : " · not extracted yet"}
+                                {extractionQualityByPaperId[p.id]?.status !== "Not Extracted" ? (
+                                  <>
+                                    {" · "}
+                                    <ExtractionQualityPanel
+                                      report={extractionQualityByPaperId[p.id]}
+                                      compact
+                                    />
+                                  </>
+                                ) : null}
+                              </span>
+                              <div className="question-paper-row-actions">
                                 <button
                                   type="button"
                                   className="question-paper-reextract-btn"
-                                  title="Re-extract questions from this paper"
-                                  disabled={classifyingBusy}
-                                  onClick={() => void reextractQuestionPaper(p)}
+                                  title="Extract questions from this paper into the question bank"
+                                  disabled={updatingQuestionBankBusy}
+                                  onClick={() => void updateQuestionBank(p)}
                                 >
-                                  Re-extract
+                                  Update question bank
                                 </button>
                                 <button
                                   type="button"
-                                  className="source-action-icon source-action-danger"
+                                  className="source-action-icon source-action-danger question-paper-delete-btn"
                                   title="Delete"
                                   aria-label={`Delete ${p.name}`}
                                   onClick={() => void deleteQuestionPaper(p)}
@@ -3372,6 +3838,89 @@ function MaterialsPage({ user, onSignOut, ownerId }) {
           ) : null}
         </article>
       </section>
+
+      {syllabusKnowledgeModal && (
+        <div
+          className="modal-backdrop"
+          role="presentation"
+          onClick={() => setSyllabusKnowledgeModal(null)}
+        >
+          <div
+            className="compiled-modal syllabus-knowledge-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="syllabus-knowledge-title"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h2 id="syllabus-knowledge-title">Syllabus knowledge</h2>
+            <p className="compiled-modal-meta">
+              {syllabusKnowledgeModal.classItem.name} · {syllabusKnowledgeModal.unit.name}
+              {syllabusKnowledgeModal.unit.title
+                ? ` — ${syllabusKnowledgeModal.unit.title}`
+                : ""}
+            </p>
+            <p className="compiled-intro">
+              Concepts extracted from uploaded syllabus PDFs in this unit, grouped by chapter.
+            </p>
+
+            {syllabusKnowledgeModal.loading ? (
+              <p className="inline-muted">Loading concepts…</p>
+            ) : (
+              <div className="syllabus-knowledge-body">
+                {(syllabusKnowledgeModal.unit.chapters || []).map((chapter) => {
+                  const kb = syllabusKnowledgeByChapterId[chapter.id];
+                  const concepts =
+                    syllabusKnowledgeModal.conceptsByChapterId[chapter.id] || [];
+                  const hasSyllabus = (chapter.files || []).some(
+                    (f) => normalizeMaterialCategory(f) === "Syllabus"
+                  );
+                  if (!hasSyllabus && !kb && !concepts.length) return null;
+
+                  return (
+                    <article key={chapter.id} className="syllabus-knowledge-chapter">
+                      <h4>{chapter.name}</h4>
+                      {kb?.summary ? (
+                        <p className="syllabus-knowledge-summary">{kb.summary}</p>
+                      ) : null}
+                      {kb?.extractStatus === "failed" ? (
+                        <p className="syllabus-knowledge-empty">
+                          {kb.extractError || "Knowledge build failed."}
+                        </p>
+                      ) : null}
+                      {kb?.extractStatus === "pending" ? (
+                        <p className="syllabus-knowledge-empty">Building knowledge…</p>
+                      ) : null}
+                      {!kb && hasSyllabus ? (
+                        <p className="syllabus-knowledge-empty">
+                          Syllabus uploaded — click Rebuild on the chapter to extract concepts.
+                        </p>
+                      ) : null}
+                      {!hasSyllabus && !kb ? (
+                        <p className="syllabus-knowledge-empty">No syllabus uploaded.</p>
+                      ) : null}
+                      {concepts.length > 0 ? (
+                        <ul className="syllabus-knowledge-concepts">
+                          {concepts.map((name, idx) => (
+                            <li key={`${chapter.id}-${idx}-${name}`}>{name}</li>
+                          ))}
+                        </ul>
+                      ) : kb?.extractStatus === "complete" ? (
+                        <p className="syllabus-knowledge-empty">No concepts stored.</p>
+                      ) : null}
+                    </article>
+                  );
+                })}
+              </div>
+            )}
+
+            <div className="compiled-modal-actions">
+              <button type="button" onClick={() => setSyllabusKnowledgeModal(null)}>
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {compiledModal && (
         <div
@@ -3498,9 +4047,13 @@ function MaterialsPage({ user, onSignOut, ownerId }) {
                 questionPaperModal;
               const file = previewFileShape(paper);
               const paperHref = hrefFor(file);
-              const items = sortPaperBankQuestions(
-                questionsForPaperOrMaterial(questionBankEntries, paper.id)
+              const items = validatedPaperQuestions(questionBankEntries, paper.id);
+              const paperChapterOptions = buildChapterIndexForClass(catalog, paper.classId);
+              const questionCountLabel = formatPaperQuestionCount(
+                questionBankEntries,
+                paper.id
               );
+              const qualityReport = extractionQualityByPaperId[paper.id];
               return (
                 <>
                   <div className="question-paper-modal-head">
@@ -3567,9 +4120,19 @@ function MaterialsPage({ user, onSignOut, ownerId }) {
                         }
                       >
                         {view === "questions"
-                          ? "View original upload"
-                          : "View extracted questions"}
+                          ? "View original PDF"
+                          : "View structured questions"}
                       </button>
+                      {view === "questions" && items.length > 0 ? (
+                        <button
+                          type="button"
+                          className="question-paper-view-toggle"
+                          disabled={updatingQuestionBankBusy}
+                          onClick={() => void classifyQuestionPaperChapters(paper)}
+                        >
+                          Classify chapters
+                        </button>
+                      ) : null}
                       {view === "original" && paperHref ? (
                         <button
                           type="button"
@@ -3603,16 +4166,17 @@ function MaterialsPage({ user, onSignOut, ownerId }) {
                       : ""}
                     {chapter?.name ? ` · ${chapter.name}` : ""}
                     {paper.year ? ` · ${paper.year}` : ""}
-                    {items.length
-                      ? ` · ${items.length} question${items.length === 1 ? "" : "s"}`
-                      : ""}
+                    {questionCountLabel ? ` · ${questionCountLabel}` : ""}
                   </p>
+                  {view === "questions" && qualityReport?.status !== "Not Extracted" ? (
+                    <ExtractionQualityPanel report={qualityReport} />
+                  ) : null}
                   {view === "questions" ? (
                     items.length === 0 ? (
                       <p className="empty-state">
-                        No questions extracted yet. Use <strong>Re-extract</strong> on the paper
-                        list, or set <code>VITE_OPENAI_API_KEY</code> for better results on
-                        bilingual PDFs.
+                        No questions extracted yet. Click <strong>Update question bank</strong> on
+                        the paper list, or set <code>VITE_OPENAI_API_KEY</code> for better results
+                        on bilingual PDFs.
                       </p>
                     ) : (
                       <div className="practise-questions-table-wrap">
@@ -3622,51 +4186,58 @@ function MaterialsPage({ user, onSignOut, ownerId }) {
                               <th scope="col">#</th>
                               <th scope="col">Question</th>
                               <th scope="col">Marks</th>
+                              <th scope="col">Chapter</th>
+                              <th scope="col">Difficulty</th>
+                              <th scope="col">Solution</th>
                             </tr>
                           </thead>
                           <tbody>
-                            {items.map((entry, index) => {
-                              const showSolution = visibleChapterSolutions.has(entry.id);
-                              const hasSolution =
-                                entry.solution && `${entry.solution}`.trim();
-                              return (
-                                <tr key={entry.id}>
-                                  <td className="practise-col-no">{index + 1}</td>
-                                  <td className="practise-col-question">
-                                    <p className="practise-question-text">
-                                      {entry.questionText}
-                                    </p>
-                                    {hasSolution ? (
-                                      <div className="practise-question-solution-wrap">
-                                        <button
-                                          type="button"
-                                          className="practise-solution-link"
-                                          onClick={() =>
-                                            setVisibleChapterSolutions((prev) => {
-                                              const next = new Set(prev);
-                                              if (next.has(entry.id)) next.delete(entry.id);
-                                              else next.add(entry.id);
-                                              return next;
-                                            })
-                                          }
-                                          aria-expanded={showSolution}
-                                        >
-                                          {showSolution ? "Hide solution" : "View solution"}
-                                        </button>
-                                        {showSolution ? (
-                                          <div className="practise-question-solution">
-                                            <p>{entry.solution}</p>
-                                          </div>
-                                        ) : null}
-                                      </div>
-                                    ) : null}
-                                  </td>
-                                  <td className="practise-col-marks">
-                                    {entry.marks != null ? entry.marks : "—"}
-                                  </td>
-                                </tr>
-                              );
-                            })}
+                            {items.map((entry) => (
+                              <tr key={entry.id}>
+                                <td className="practise-col-no">
+                                  {entry.questionNo ?? "—"}
+                                </td>
+                                <td className="practise-col-question">
+                                  <QuestionText text={entry.questionText} />
+                                </td>
+                                <td className="practise-col-marks">
+                                  {entry.marks != null ? entry.marks : "—"}
+                                </td>
+                                <td className="practise-col-chapter">
+                                  <QuestionChapterCell
+                                    chapterId={entry.chapterId}
+                                    chapterName={entry.chapterName}
+                                    confidence={entry.chapterConfidence}
+                                    reviewStatus={entry.reviewStatus}
+                                    alternatives={entry.classificationAlternatives}
+                                    chapters={paperChapterOptions}
+                                    onSelectChapter={(chapterId) =>
+                                      void updateQuestionChapter(
+                                        entry.id,
+                                        chapterId,
+                                        paper.classId
+                                      )
+                                    }
+                                  />
+                                </td>
+                                <td className="practise-col-difficulty">
+                                  <DifficultyGauge
+                                    value={entry.difficultyLevel}
+                                    onChange={(level) =>
+                                      updateQuestionDifficulty(entry.id, level)
+                                    }
+                                  />
+                                </td>
+                                <td className="practise-col-solution">
+                                  <QuestionSolutionCell
+                                    solution={entry.solution}
+                                    questionId={entry.id}
+                                    expanded={visibleChapterSolutions.has(entry.id)}
+                                    onToggle={toggleQuestionSolution}
+                                  />
+                                </td>
+                              </tr>
+                            ))}
                           </tbody>
                         </table>
                       </div>
@@ -3940,59 +4511,46 @@ function MaterialsPage({ user, onSignOut, ownerId }) {
                             <th scope="col">#</th>
                             <th scope="col">Question</th>
                             <th scope="col">Marks</th>
+                            <th scope="col">Difficulty</th>
+                            <th scope="col">Solution</th>
                             <th scope="col">Source</th>
                             <th scope="col">Year</th>
                           </tr>
                         </thead>
                         <tbody>
-                          {items.map((entry, index) => {
-                            const showSolution = visibleChapterSolutions.has(entry.id);
-                            const hasSolution =
-                              entry.solution && `${entry.solution}`.trim();
-                            return (
-                              <tr key={entry.id}>
-                                <td className="practise-col-no">{index + 1}</td>
-                                <td className="practise-col-question">
-                                  <p className="practise-question-text">
-                                    {entry.questionText}
-                                  </p>
-                                  {hasSolution ? (
-                                    <div className="practise-question-solution-wrap">
-                                      <button
-                                        type="button"
-                                        className="practise-solution-link"
-                                        onClick={() =>
-                                          setVisibleChapterSolutions((prev) => {
-                                            const next = new Set(prev);
-                                            if (next.has(entry.id)) next.delete(entry.id);
-                                            else next.add(entry.id);
-                                            return next;
-                                          })
-                                        }
-                                        aria-expanded={showSolution}
-                                      >
-                                        {showSolution ? "Hide solution" : "View solution"}
-                                      </button>
-                                      {showSolution ? (
-                                        <div className="practise-question-solution">
-                                          <p>{entry.solution}</p>
-                                        </div>
-                                      ) : null}
-                                    </div>
-                                  ) : null}
-                                </td>
-                                <td className="practise-col-marks">
-                                  {entry.marks != null ? entry.marks : "—"}
-                                </td>
-                                <td className="practise-col-source">
-                                  {entry.source || "—"}
-                                </td>
-                                <td className="practise-col-year">
-                                  {entry.year ?? "—"}
-                                </td>
-                              </tr>
-                            );
-                          })}
+                          {items.map((entry, index) => (
+                            <tr key={entry.id}>
+                              <td className="practise-col-no">{index + 1}</td>
+                              <td className="practise-col-question">
+                                <QuestionText text={entry.questionText} />
+                              </td>
+                              <td className="practise-col-marks">
+                                {entry.marks != null ? entry.marks : "—"}
+                              </td>
+                              <td className="practise-col-difficulty">
+                                <DifficultyGauge
+                                  value={entry.difficultyLevel}
+                                  onChange={(level) =>
+                                    updateQuestionDifficulty(entry.id, level)
+                                  }
+                                />
+                              </td>
+                              <td className="practise-col-solution">
+                                <QuestionSolutionCell
+                                  solution={entry.solution}
+                                  questionId={entry.id}
+                                  expanded={visibleChapterSolutions.has(entry.id)}
+                                  onToggle={toggleQuestionSolution}
+                                />
+                              </td>
+                              <td className="practise-col-source">
+                                {entry.source || "—"}
+                              </td>
+                              <td className="practise-col-year">
+                                {entry.year ?? "—"}
+                              </td>
+                            </tr>
+                          ))}
                         </tbody>
                       </table>
                     </div>
@@ -4131,7 +4689,7 @@ function SignInPage({
       <header className="signin-brand">
         <div className="brand">
           <span className="brand-mark">E</span>
-          <span className="brand-name">Enlightly</span>
+          <span className="brand-name">enlightenly</span>
         </div>
       </header>
       <section className="signin-hero">
@@ -4292,7 +4850,7 @@ function SignInPage({
         </div>
       )}
 
-      <p className="footer-copy">© Enlightly · Crafted for educators</p>
+      <p className="footer-copy">© enlightenly · Crafted for educators</p>
     </main>
   );
 }

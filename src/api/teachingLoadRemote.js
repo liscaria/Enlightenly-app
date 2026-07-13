@@ -51,6 +51,9 @@ export function questionPaperRowToUi(row, catalog) {
     storedAt: row.created_at,
     remoteStorageBucket: row.storage_bucket,
     remoteStoragePath: row.storage_path,
+    solutionStoragePath: row.solution_storage_path ?? null,
+    solutionMimeType: row.solution_mime_type ?? null,
+    hasSolution: Boolean(row.solution_storage_path),
   };
 }
 

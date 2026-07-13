@@ -196,3 +196,20 @@ export async function countQuestionBankForPaper(supabase, ownerId, questionPaper
   }
   return count ?? 0;
 }
+
+/** Load all question_bank rows for one exam paper. */
+export async function queryQuestionBankForPaper(supabase, ownerId, questionPaperId) {
+  const { data, error } = await supabase
+    .from("question_bank")
+    .select("*")
+    .eq("owner_id", ownerId)
+    .eq("origin_type", "question_paper")
+    .eq("question_paper_id", questionPaperId)
+    .order("question_no", { ascending: true });
+
+  if (error) {
+    log("warn", "questionBank.queryForPaper", { error: error.message });
+    return [];
+  }
+  return data || [];
+}

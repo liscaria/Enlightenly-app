@@ -17,6 +17,7 @@ import {
 import { queryManualOverridesByQuestionNo } from "../data/questionClassificationRemote.js";
 import { fetchCatalogWithMaterialsForClass } from "../data/catalogRemote.js";
 import { buildChapterIndexForClass } from "../data/questionBankUtils.js";
+import { createUsageAccumulator } from "../lib/openaiUsageAccumulator.js";
 
 async function updateJob(supabase, jobId, ownerId, patch) {
   const { error } = await supabase
@@ -68,6 +69,8 @@ export async function processPaperJob({
   let bankRowCount = 0;
   let assignedCount = 0;
   let classifiedBy = "none";
+  const accumulator = createUsageAccumulator({ ownerId, jobId, paperId, requestId });
+  const usageContext = { supabase, ownerId, jobId, paperId, requestId };
 
   try {
     await updateJob(supabase, jobId, ownerId, {
@@ -86,6 +89,8 @@ export async function processPaperJob({
     const result = await extractQuestionsFromDocument(file.blob, {
       name: file.name,
       mimeType: file.mimeType,
+      usageContext,
+      accumulator,
     });
 
     if (!result.questions?.length) {
@@ -124,6 +129,8 @@ export async function processPaperJob({
         requestId,
         jobId,
         paperId,
+        usageContext,
+        accumulator,
       });
       if (classified.error) {
         throw new Error(classified.error);
@@ -173,6 +180,10 @@ export async function processPaperJob({
     }
 
     const finishedAt = new Date().toISOString();
+    const usageSummary = accumulator.toSummary({
+      extractPath: result.extractionPath ?? null,
+      classifiedBy,
+    });
     await updateJob(supabase, jobId, ownerId, {
       status: "completed",
       phase: "completed",
@@ -180,6 +191,7 @@ export async function processPaperJob({
       classified_by: classifiedBy,
       question_count: enriched.length,
       quality_report: qualityReport,
+      usage_summary: usageSummary,
       error: null,
       finished_at: finishedAt,
     });
@@ -198,12 +210,15 @@ export async function processPaperJob({
       requestId,
       jobId,
       paperId,
+      ownerId,
       questionCount: enriched.length,
       bankRowCount,
       assignedCount,
       extractedBy: result.extractedBy,
+      extractionPath: result.extractionPath,
       classifiedBy,
       validationStatus: qualityReport?.validationStatus,
+      usage: accumulator.totals(),
     });
 
     return {
@@ -213,8 +228,10 @@ export async function processPaperJob({
       bankRowCount,
       assignedCount,
       extractedBy: result.extractedBy,
+      extractionPath: result.extractionPath,
       classifiedBy,
       qualityReport,
+      usageSummary,
       questions: enriched,
     };
   } catch (err) {

@@ -25,6 +25,8 @@ import {
   needsQuestionNumberRepair,
 } from "./questionNumberSplit.js";
 import { normalizePhysicsNotation } from "./physicsNotation.js";
+import { chatCompletion } from "../lib/openaiClient.js";
+import { OPENAI_ACTIONS } from "../lib/openaiUsageAccumulator.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 pdfjs.GlobalWorkerOptions.workerSrc = path.join(
@@ -36,35 +38,6 @@ const OPENAI_API_KEY = (process.env.OPENAI_API_KEY || "").trim();
 const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-4o-mini";
 export const isOpenAIConfigured = Boolean(OPENAI_API_KEY);
 
-async function openaiChatCompletion(body, { label = "AI extraction" } = {}) {
-  const maxAttempts = 3;
-  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-    const response = await fetch("https://api.openai.com/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${OPENAI_API_KEY}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify(body),
-    });
-
-    if (response.ok) return response;
-
-    const detail = await response.text();
-    const retryable = response.status === 429 || response.status >= 500;
-    if (!retryable || attempt === maxAttempts) {
-      throw new Error(`${label} failed (${response.status}): ${detail.slice(0, 200)}`);
-    }
-
-    const retryAfterSec = Number(response.headers.get("retry-after")) || attempt * 15;
-    console.warn(
-      `[questionExtraction] ${label} rate limited (${response.status}); retry ${attempt}/${maxAttempts - 1} in ${retryAfterSec}s`
-    );
-    await new Promise((resolve) => setTimeout(resolve, retryAfterSec * 1000));
-  }
-
-  throw new Error(`${label} failed after retries.`);
-}
 const PAGE_BREAK = "\n\n---PAGE---\n\n";
 const MAX_QUESTIONS = 300;
 const AI_CHUNK_SIZE = 28000;
@@ -932,19 +905,28 @@ function extractWithHeuristics(text) {
     .slice(0, MAX_QUESTIONS);
 }
 
-async function extractWithOpenAISingle(text, fileName, { existingQuestions = [], paperContext = {} } = {}) {
+async function extractWithOpenAISingle(
+  text,
+  fileName,
+  { existingQuestions = [], paperContext = {}, usageContext = null, accumulator = null } = {}
+) {
   if (!isOpenAIConfigured) return [];
 
   const trimmed = text.slice(0, AI_CHUNK_SIZE);
   const offsetHint = buildAlreadyExtractedHint(existingQuestions, paperContext);
-  const response = await openaiChatCompletion({
-    model: OPENAI_MODEL,
-    temperature: 0,
-    response_format: { type: "json_object" },
-    messages: buildExtractionMessages(trimmed + offsetHint, fileName),
+  const payload = await chatCompletion({
+    body: {
+      model: OPENAI_MODEL,
+      temperature: 0,
+      response_format: { type: "json_object" },
+      messages: buildExtractionMessages(trimmed + offsetHint, fileName),
+    },
+    action: OPENAI_ACTIONS.EXTRACT_TEXT,
+    usageContext,
+    accumulator,
+    label: "AI text extraction",
   });
 
-  const payload = await response.json();
   const raw = payload?.choices?.[0]?.message?.content || "{}";
   let parsed;
   try {
@@ -957,7 +939,7 @@ async function extractWithOpenAISingle(text, fileName, { existingQuestions = [],
   return list;
 }
 
-async function extractWithOpenAI(text, fileName) {
+async function extractWithOpenAI(text, fileName, usageOpts = {}) {
   if (!isOpenAIConfigured) return { questions: [], validation: null };
 
   const chunks = text.includes(PAGE_BREAK)
@@ -974,7 +956,7 @@ async function extractWithOpenAI(text, fileName) {
     const batch = await extractWithOpenAISingle(
       chunks[i],
       `${fileName} (pages ${i + 1}/${chunks.length})`,
-      { existingQuestions: all, paperContext }
+      { existingQuestions: all, paperContext, ...usageOpts }
     );
     mergePaperContextFromQuestions(paperContext, batch);
     all.push(...batch);
@@ -988,8 +970,10 @@ function visionModelForExtraction() {
 }
 
 /** Read scanned or image-only PDF pages via OpenAI vision. */
-async function extractWithOpenAIVision(blob, fileName) {
+async function extractWithOpenAIVision(blob, fileName, usageOpts = {}) {
   if (!isOpenAIConfigured) return { questions: [], pagesRendered: 0, batches: 0 };
+
+  const { usageContext, accumulator } = usageOpts;
 
   const { dataUrls: images, pageCount } = await pdfBlobToPageImages(blob);
   if (!images.length) {
@@ -1019,8 +1003,8 @@ async function extractWithOpenAIVision(blob, fileName) {
     const pageEnd = i + 1;
     const offsetHint = buildAlreadyExtractedHint(all, paperContext);
 
-    const response = await openaiChatCompletion(
-      {
+    const payload = await chatCompletion({
+      body: {
         model,
         temperature: 0,
         max_tokens: 8192,
@@ -1050,10 +1034,13 @@ async function extractWithOpenAIVision(blob, fileName) {
           },
         ],
       },
-      { label: "AI vision extraction" }
-    );
+      action: OPENAI_ACTIONS.EXTRACT_VISION,
+      usageContext,
+      accumulator,
+      metadata: { pageStart, pageEnd, contextPage },
+      label: "AI vision extraction",
+    });
 
-    const payload = await response.json();
     const raw = payload?.choices?.[0]?.message?.content || "{}";
     try {
       const parsed = JSON.parse(raw);
@@ -1088,7 +1075,8 @@ async function extractWithOpenAIVision(blob, fileName) {
       fileName,
       paperContext,
       repair.retry,
-      extractOrder
+      extractOrder,
+      usageOpts
     );
     if (retryBatch.length) {
       const retryNos = new Set(retryBatch.map((q) => q.questionNo));
@@ -1118,10 +1106,12 @@ async function retryMissingQuestionsVision(
   fileName,
   paperContext,
   retryNumbers,
-  startExtractOrder
+  startExtractOrder,
+  usageOpts = {}
 ) {
   if (!retryNumbers?.length || !images.length || !isOpenAIConfigured) return [];
 
+  const { usageContext, accumulator } = usageOpts;
   const model = visionModelForExtraction();
   const found = [];
   let extractOrder = startExtractOrder;
@@ -1129,10 +1119,10 @@ async function retryMissingQuestionsVision(
 
   for (let i = 0; i < images.length && pending.size > 0; i += 1) {
     const batch = [...pending].sort((a, b) => a - b).slice(0, 8);
-    let response;
+    let payload;
     try {
-      response = await openaiChatCompletion(
-        {
+      payload = await chatCompletion({
+        body: {
           model,
           temperature: 0,
           max_tokens: 4096,
@@ -1160,14 +1150,17 @@ async function retryMissingQuestionsVision(
             },
           ],
         },
-        { label: "AI vision retry" }
-      );
+        action: OPENAI_ACTIONS.EXTRACT_VISION,
+        usageContext,
+        accumulator,
+        metadata: { retry: true, page: i + 1, retryNumbers: batch },
+        label: "AI vision retry",
+      });
     } catch {
       continue;
     }
 
     try {
-      const payload = await response.json();
       const raw = payload?.choices?.[0]?.message?.content || "{}";
       const parsed = JSON.parse(raw);
       mergePaperContextFromParsed(paperContext, parsed);
@@ -1241,8 +1234,13 @@ function isPdfBlob(blob, mimeType, name = "") {
   return mime === "application/pdf" || lowerName.endsWith(".pdf");
 }
 
-export async function extractQuestionsFromDocument(blob, { name, mimeType } = {}) {
-  if (!blob) return { questions: [], extractedBy: "none" };
+export async function extractQuestionsFromDocument(
+  blob,
+  { name, mimeType, usageContext = null, accumulator = null } = {}
+) {
+  if (!blob) return { questions: [], extractedBy: "none", extractionPath: "none" };
+
+  const usageOpts = { usageContext, accumulator };
 
   const isPdf = await blobLooksLikePdf(blob, mimeType, name);
   let structuredPages = null;
@@ -1290,6 +1288,7 @@ export async function extractQuestionsFromDocument(blob, { name, mimeType } = {}
     return {
       questions: [],
       extractedBy: "none",
+      extractionPath: "none",
       englishLetters: 0,
       failureReason: formatExtractionFailureReason({
         englishLetters: 0,
@@ -1307,11 +1306,12 @@ export async function extractQuestionsFromDocument(blob, { name, mimeType } = {}
 
   if (useTextAi) {
     try {
-      const textResult = await extractWithOpenAI(textForAi, name || "question-paper");
+      const textResult = await extractWithOpenAI(textForAi, name || "question-paper", usageOpts);
       if (textResult.questions.length) {
         return {
           questions: textResult.questions,
           extractedBy: "ai",
+          extractionPath: "text",
           englishLetters,
           validation: textResult,
         };
@@ -1338,13 +1338,14 @@ export async function extractQuestionsFromDocument(blob, { name, mimeType } = {}
   if (isOpenAIConfigured && isPdf) {
     try {
       visionAttempted = true;
-      const visionResult = await extractWithOpenAIVision(blob, name || "question-paper");
+      const visionResult = await extractWithOpenAIVision(blob, name || "question-paper", usageOpts);
       visionPagesRendered = visionResult.pagesRendered;
       visionBatches = visionResult.batches;
       if (visionResult.questions.length) {
         return {
           questions: visionResult.questions,
           extractedBy: "ai",
+          extractionPath: "vision",
           englishLetters,
           validation: visionResult.validation,
         };
@@ -1366,6 +1367,7 @@ export async function extractQuestionsFromDocument(blob, { name, mimeType } = {}
       return {
         questions: layoutResult.questions,
         extractedBy: "heuristic",
+        extractionPath: "heuristic",
         englishLetters,
         validation: layoutResult,
       };
@@ -1382,6 +1384,7 @@ export async function extractQuestionsFromDocument(blob, { name, mimeType } = {}
     return {
       questions: heuristicResult.questions,
       extractedBy: "heuristic",
+      extractionPath: "heuristic",
       englishLetters,
       validation: heuristicResult,
     };
@@ -1390,6 +1393,7 @@ export async function extractQuestionsFromDocument(blob, { name, mimeType } = {}
   return {
     questions: [],
     extractedBy: "none",
+    extractionPath: "none",
     englishLetters,
     failureReason: formatExtractionFailureReason({
       englishLetters,

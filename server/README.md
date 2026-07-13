@@ -2,17 +2,19 @@
 
 Node service for Question Bank exam-paper processing. Implemented in phases — see `db/supabase/PHASE0_SETUP.md`.
 
-## Phase 1 (current)
+## Phase 3 (current)
 
-Extraction API with no frontend integration yet. Endpoints:
+Frontend **Update question bank** calls Railway when `VITE_USE_EXTRACTION_API=true`. See **`PHASE3_TESTING.md`**.
+
+Endpoints:
 
 | Method | Path | Auth | Purpose |
 |--------|------|------|---------|
 | GET | `/health` | No | Liveness + config check |
-| POST | `/papers/:paperId/process` | Bearer JWT | Extract questions, write `extraction_jobs` + `question_bank` (Phase 2) |
+| POST | `/papers/:paperId/process` | Bearer JWT | Extract, classify, persist `question_bank` + `question_classifications` |
 | GET | `/jobs/:jobId` | Bearer JWT | Poll job status + quality report |
 
-Phase 1 extraction is complete on Railway. **Phase 2** adds `question_bank` persistence (`classifiedBy: "none"`). Chapter classification is Phase 2b.
+Phase 2b added chapter classification (`assignedCount`, `classifiedBy: "vector"` \| `"ai"` \| `"heuristic"`).
 
 ### Local setup
 
@@ -38,6 +40,12 @@ curl http://localhost:3000/health
 See **`PHASE1_TESTING.md`** for JWT + `POST /papers/:id/process` curl examples and parity testing.
 
 See **`PHASE2_TESTING.md`** for question_bank persistence verification.
+
+See **`PHASE2B_TESTING.md`** for chapter classification verification.
+
+See **`PHASE3_TESTING.md`** for frontend integration (`VITE_USE_EXTRACTION_API`).
+
+See **`OPENAI_USAGE_TRACKING.md`** for per-action token and cost monitoring.
 
 ### Railway deploy
 

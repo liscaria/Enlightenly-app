@@ -112,6 +112,8 @@ export async function classifyPaperQuestions({
   requestId,
   jobId,
   paperId,
+  usageContext = null,
+  accumulator = null,
 }) {
   if (!EXTRACTION_FEATURE_FLAGS.classifyToChapters) {
     return {
@@ -143,7 +145,8 @@ export async function classifyPaperQuestions({
       const vectorResult = await classifyQuestionsWithVectorKb(
         questions,
         kbProfiles,
-        chapterIndex
+        chapterIndex,
+        { usageContext, accumulator }
       );
       if (vectorResult.error) {
         log("warn", "classify.vectorFailed", {
@@ -185,6 +188,8 @@ export async function classifyPaperQuestions({
     const llmResult = await classifyQuestionsToChapters(questions, chapterIndex, {
       syllabusText,
       paperName: paper.name,
+      usageContext,
+      accumulator,
     });
     classified = attachLegacyClassification(llmResult.questions, llmResult.classifiedBy);
     classifiedBy = llmResult.classifiedBy;

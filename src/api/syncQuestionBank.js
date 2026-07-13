@@ -10,19 +10,78 @@ import {
   remoteUpsertQuestionBank,
   questionBankRowsFromQuestionPaper,
 } from "./questionBankRemote.js";
+import { remoteEnsureQuestionPaperRecord } from "./questionPapersRemote.js";
 import {
   buildChapterIndexForClass,
   entryToQuestionShape,
   questionBankRowToEntry,
+  stampPaperExpectedTotal,
 } from "./questionBankUtils.js";
 import {
   assignQuestionIds,
   extractQuestionsFromDocument,
+  extractionQualityStats,
+  formatExtractionQualityMessage,
+  formatExtractionValidationMessage,
 } from "./questionExtraction.js";
+import {
+  buildExtractionQualityReportFromQuestions,
+  formatExtractionQualitySummary,
+} from "./extractionQualityReport.js";
 import {
   classifyQuestionsToChapters,
   collectSyllabusTextForClass,
 } from "./questionChapterClassification.js";
+import { remoteQueryKnowledgeEmbeddingsForClass } from "./syllabusKnowledgeRemote.js";
+import { classifyQuestionsWithVectorKb } from "./questionVectorClassification.js";
+import { remoteUpsertQuestionClassifications, remoteQueryManualOverrideQuestionIds } from "./questionClassificationRemote.js";
+import {
+  CLASSIFICATION_SOURCE,
+  reviewStatusFromConfidence,
+} from "../constants/classificationReview.js";
+import { EXTRACTION_FEATURE_FLAGS } from "../constants/extractionConfig.js";
+import { isExtractionApiConfigured } from "./extractionApiConfig.js";
+import {
+  processQuestionPaperRemote,
+  reclassifyPaperRemote,
+} from "./extractionApiRemote.js";
+
+function classificationFromQuestion(q, source) {
+  if (!q?.id || !q?.chapterId) return null;
+  const confidence =
+    q.classification?.confidence ??
+    (q.chapterConfidence != null ? Number(q.chapterConfidence) / 100 : 0.5);
+  return {
+    questionId: q.id,
+    chapterId: q.chapterId,
+    confidence: Math.max(0, Math.min(1, confidence)),
+    alternatives: q.classification?.alternatives ?? [],
+    reviewStatus:
+      q.classification?.reviewStatus ?? reviewStatusFromConfidence(confidence),
+    classificationSource: q.classification?.classificationSource ?? source,
+  };
+}
+
+function attachLegacyClassification(questions, classifiedBy) {
+  const source =
+    classifiedBy === "heuristic"
+      ? CLASSIFICATION_SOURCE.HEURISTIC_FALLBACK
+      : CLASSIFICATION_SOURCE.AI_RERANK;
+  return questions.map((q) => {
+    if (!q.chapterId || q.classification) return q;
+    const confidence = q.chapterConfidence != null ? Number(q.chapterConfidence) / 100 : 0.5;
+    return {
+      ...q,
+      classification: {
+        chapterId: q.chapterId,
+        confidence,
+        alternatives: [],
+        reviewStatus: reviewStatusFromConfidence(confidence),
+        classificationSource: source,
+      },
+    };
+  });
+}
 
 async function classifyForExamPaper(
   questions,
@@ -33,8 +92,33 @@ async function classifyForExamPaper(
 ) {
   const chapterIndex = buildChapterIndexForClass(catalog, paper.classId);
   if (!chapterIndex.length) {
+    console.warn(
+      "[chapterClassification] No chapters in catalog for class",
+      paper.classId
+    );
     return { questions, classifiedBy: "none", chapterIndex };
   }
+
+  if (ownerId && EXTRACTION_FEATURE_FLAGS.useVectorClassification !== false) {
+    const kbProfiles = await remoteQueryKnowledgeEmbeddingsForClass(
+      ownerId,
+      paper.classId
+    );
+    if (kbProfiles.length) {
+      const { questions: classified, classifiedBy, error } =
+        await classifyQuestionsWithVectorKb(questions, kbProfiles, chapterIndex);
+      if (error) {
+        console.warn("[chapterClassification] Vector classify failed:", error);
+      } else if (classifiedBy === "vector") {
+        const assigned = classified.filter((q) => q.chapterId).length;
+        console.info(
+          `[chapterClassification] ${paper.name}: ${assigned}/${questions.length} assigned (vector, ${kbProfiles.length} KB chapters)`
+        );
+        return { questions: classified, classifiedBy, chapterIndex };
+      }
+    }
+  }
+
   const syllabusText = await collectSyllabusTextForClass(
     catalog,
     paper.classId,
@@ -42,6 +126,13 @@ async function classifyForExamPaper(
     normalizeMaterialCategory,
     { ownerId, remoteDownloadMaterial }
   );
+  if (!syllabusText.trim()) {
+    console.warn(
+      "[chapterClassification] No syllabus text loaded for class",
+      paper.classId,
+      "— classifying from chapter names only."
+    );
+  }
   const { questions: classified, classifiedBy } = await classifyQuestionsToChapters(
     questions,
     chapterIndex,
@@ -50,7 +141,12 @@ async function classifyForExamPaper(
       paperName: paper.name,
     }
   );
-  return { questions: classified, classifiedBy, chapterIndex };
+  const withMeta = attachLegacyClassification(classified, classifiedBy);
+  const assigned = withMeta.filter((q) => q.chapterId).length;
+  console.info(
+    `[chapterClassification] ${paper.name}: ${assigned}/${questions.length} assigned (${classifiedBy}, ${chapterIndex.length} chapters, syllabus ${syllabusText.length} chars)`
+  );
+  return { questions: withMeta, classifiedBy, chapterIndex };
 }
 
 function sanitizeChapterAssignments(questions, chapterIndex) {
@@ -58,7 +154,13 @@ function sanitizeChapterAssignments(questions, chapterIndex) {
   const validIds = new Set(chapterIndex.map((c) => c.id));
   return questions.map((q) => {
     if (q.chapterId && !validIds.has(q.chapterId)) {
-      return { ...q, chapterId: null, unitId: null, chapterName: null };
+      return {
+        ...q,
+        chapterId: null,
+        unitId: null,
+        chapterName: null,
+        chapterConfidence: null,
+      };
     }
     return q;
   });
@@ -91,14 +193,39 @@ async function persistClassifiedPaperQuestions(
 
   let error;
   if (replace) {
-    error = await remoteReplaceQuestionBankForQuestionPaper(ownerId, paper, {
-      questions: safeQuestions,
-    });
+    error = await remoteReplaceQuestionBankForQuestionPaper(
+      ownerId,
+      paper,
+      { questions: safeQuestions },
+      {
+        catalog,
+        ensureQuestionPaperRecord: remoteEnsureQuestionPaperRecord,
+      }
+    );
   } else {
+    const ensureErr = await remoteEnsureQuestionPaperRecord(ownerId, paper, catalog);
+    if (ensureErr) {
+      return { error: ensureErr, rowCount: 0 };
+    }
     const rows = questionBankRowsFromQuestionPaper(ownerId, paper, {
       questions: safeQuestions,
     });
     error = await remoteUpsertQuestionBank(ownerId, rows);
+  }
+
+  if (!error) {
+    const clsRows = safeQuestions
+      .filter((q) => q.classification)
+      .map((q) =>
+        classificationFromQuestion(q, q.classification.classificationSource)
+      )
+      .filter(Boolean);
+    if (clsRows.length) {
+      const clsErr = await remoteUpsertQuestionClassifications(ownerId, clsRows);
+      if (clsErr) {
+        return { error: clsErr, rowCount: safeQuestions.length };
+      }
+    }
   }
 
   return { error, rowCount: safeQuestions.length };
@@ -136,11 +263,11 @@ async function getQuestionPaperBlob(
 async function extractQuestionsFromPaperBlob(paper, blobOptions = {}) {
   const file = await getQuestionPaperBlob(paper, blobOptions);
   if (!file?.blob) return { questions: [], extractedBy: "none" };
-  const { questions, extractedBy } = await extractQuestionsFromDocument(file.blob, {
+  const { questions, extractedBy, failureReason } = await extractQuestionsFromDocument(file.blob, {
     name: file.name || paper.name,
     mimeType: file.mimeType || paper.mimeType,
   });
-  if (!questions.length) return { questions: [], extractedBy };
+  if (!questions.length) return { questions: [], extractedBy, failureReason };
   return { questions: assignQuestionIds(questions, extractedBy), extractedBy };
 }
 
@@ -196,18 +323,27 @@ export async function syncQuestionBankFromQuestionPaper(
     return { count: 0, extractedBy: "none", classifiedBy: "none", error: null, questions: [] };
   }
 
-  const { questions, extractedBy } = await extractQuestionsFromDocument(blob, {
+  const { questions, extractedBy, failureReason, validation } = await extractQuestionsFromDocument(blob, {
     name: paper.name,
     mimeType: paper.mimeType,
   });
 
   if (!questions.length) {
-    return { count: 0, extractedBy, classifiedBy: "none", error: null, questions: [] };
+    return {
+      count: 0,
+      extractedBy,
+      classifiedBy: "none",
+      error: failureReason || null,
+      questions: [],
+    };
   }
 
-  let enriched = assignQuestionIds(questions, extractedBy);
+  let enriched = stampPaperExpectedTotal(
+    assignQuestionIds(questions, extractedBy),
+    validation?.expectedCount
+  );
   let classifiedBy = "none";
-  if (catalog.length) {
+  if (EXTRACTION_FEATURE_FLAGS.classifyToChapters && catalog.length) {
     const classified = await classifyForExamPaper(
       enriched,
       paper,
@@ -217,6 +353,14 @@ export async function syncQuestionBankFromQuestionPaper(
     );
     enriched = classified.questions;
     classifiedBy = classified.classifiedBy;
+  } else {
+    enriched = enriched.map((q) => ({
+      ...q,
+      chapterId: null,
+      unitId: null,
+      chapterName: null,
+      solution: EXTRACTION_FEATURE_FLAGS.extractSolutions ? q.solution : null,
+    }));
   }
 
   let error = null;
@@ -226,12 +370,20 @@ export async function syncQuestionBankFromQuestionPaper(
   }
 
   const assignedCount = enriched.filter((q) => q.chapterId).length;
+  const quality = extractionQualityStats(enriched);
+  const qualityReport = buildExtractionQualityReportFromQuestions(enriched, validation);
+  const validationNote =
+    formatExtractionQualitySummary(qualityReport) ||
+    formatExtractionValidationMessage(validation);
 
   return {
     count: enriched.length,
     extractedBy,
     classifiedBy,
     assignedCount,
+    quality,
+    qualityReport,
+    validationNote,
     error,
     questions: enriched,
   };
@@ -260,6 +412,11 @@ export async function reclassifyQuestionPaperBank(
 ) {
   if (!ownerId) {
     return { count: 0, assignedCount: 0, classifiedBy: "none", error: "Sign in to classify questions." };
+  }
+
+  if (isExtractionApiConfigured()) {
+    const remote = await reclassifyPaperRemote(paper.id, { onlyUnassigned });
+    return remote;
   }
 
   const blobOptions = defaultBlobOptions({
@@ -303,23 +460,35 @@ export async function reclassifyQuestionPaperBank(
     { ownerId, remoteDownloadMaterial }
   );
 
+  const overrideIds =
+    rows.length > 0
+      ? await remoteQueryManualOverrideQuestionIds(
+          ownerId,
+          questions.map((q) => q.id)
+        )
+      : new Set();
+  const originalById = new Map(questions.map((q) => [q.id, q]));
+  const merged = classified.map((q) =>
+    overrideIds.has(q.id) ? originalById.get(q.id) ?? q : q
+  );
+
   const persisted = await persistClassifiedPaperQuestions(
     ownerId,
     paper,
-    classified,
+    merged,
     catalog,
-    { replace: true }
+    { replace: !rows.length }
   );
 
-  const assignedCount = classified.filter((q) => q.chapterId).length;
+  const assignedCount = merged.filter((q) => q.chapterId).length;
 
   return {
-    count: classified.length,
+    count: merged.length,
     assignedCount,
     classifiedBy,
     extractedBy,
     error: persisted.error,
-    questions: classified,
+    questions: merged,
   };
 }
 
@@ -356,6 +525,10 @@ export async function reprocessQuestionPapersWithoutBank(
   } = {}
 ) {
   if (!ownerId || !papers?.length) {
+    return { processed: 0, totalQuestions: 0, assignedCount: 0, error: null };
+  }
+
+  if (!EXTRACTION_FEATURE_FLAGS.autoExtractOnLoad) {
     return { processed: 0, totalQuestions: 0, assignedCount: 0, error: null };
   }
 
@@ -406,7 +579,7 @@ export async function reprocessQuestionPapersWithoutBank(
       totalQuestions += sync.count;
       assignedCount += sync.assignedCount ?? 0;
       if (sync.count < minQuestionsPerPaper) {
-        lastError = `"${paper.name}" only yielded ${sync.count} question${sync.count === 1 ? "" : "s"}. Add VITE_OPENAI_API_KEY to .env.local and click Re-extract for better results.`;
+        lastError = `"${paper.name}" only yielded ${sync.count} question${sync.count === 1 ? "" : "s"}. Add VITE_OPENAI_API_KEY to .env.local and click Update question bank for better results.`;
       }
     } else if (!sync.error) {
       lastError = `No questions could be read from "${paper.name}". Set VITE_OPENAI_API_KEY for AI extraction.`;
@@ -416,8 +589,8 @@ export async function reprocessQuestionPapersWithoutBank(
   return { processed, totalQuestions, assignedCount, error: lastError };
 }
 
-/** Force re-extract one paper (deletes existing bank rows first). */
-export async function reprocessQuestionPaper(
+/** Force update question bank for one paper (deletes existing bank rows first). */
+async function updateQuestionBankForPaperImpl(
   ownerId,
   paper,
   catalog,
@@ -429,6 +602,30 @@ export async function reprocessQuestionPaper(
     remoteDownloadMaterial = null,
   } = {}
 ) {
+  if (isExtractionApiConfigured()) {
+    if (Array.isArray(catalog) && catalog.length && paper.classId) {
+      const catalogErr = await remoteSyncCatalogForClass(ownerId, catalog, paper.classId);
+      if (catalogErr) {
+        return {
+          count: 0,
+          assignedCount: 0,
+          error: `Could not sync chapters to database: ${catalogErr}`,
+        };
+      }
+    }
+
+    const ensureErr = await remoteEnsureQuestionPaperRecord(ownerId, paper, catalog);
+    if (ensureErr) {
+      return {
+        count: 0,
+        assignedCount: 0,
+        error: ensureErr,
+      };
+    }
+
+    return processQuestionPaperRemote(paper.id);
+  }
+
   const deleteError = await remoteDeleteQuestionBankByQuestionPaper(ownerId, paper.id);
   if (deleteError) {
     return {
@@ -456,6 +653,15 @@ export async function reprocessQuestionPaper(
     normalizeMaterialCategory,
     remoteDownloadMaterial,
   });
+}
+
+export async function updateQuestionBankForPaper(ownerId, paper, catalog, options = {}) {
+  return updateQuestionBankForPaperImpl(ownerId, paper, catalog, options);
+}
+
+/** @deprecated Use updateQuestionBankForPaper */
+export async function reprocessQuestionPaper(ownerId, paper, catalog, options = {}) {
+  return updateQuestionBankForPaperImpl(ownerId, paper, catalog, options);
 }
 
 /** Reclassify all exam papers for one class (e.g. after syllabus upload). */

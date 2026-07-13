@@ -12,7 +12,7 @@ jobsRouter.get("/:jobId", async (req, res) => {
     const { data, error } = await supabase
       .from("extraction_jobs")
       .select(
-        "id, question_paper_id, status, phase, extracted_by, classified_by, question_count, quality_report, error, prompt_version, request_id, started_at, finished_at, created_at"
+        "id, question_paper_id, status, phase, extracted_by, classified_by, question_count, quality_report, usage_summary, error, prompt_version, request_id, started_at, finished_at, created_at"
       )
       .eq("id", jobId)
       .eq("owner_id", ownerId)
@@ -30,6 +30,7 @@ jobsRouter.get("/:jobId", async (req, res) => {
       classifiedBy: data.classified_by,
       questionCount: data.question_count,
       qualityReport: data.quality_report,
+      usageSummary: data.usage_summary,
       error: data.error,
       promptVersion: data.prompt_version,
       requestId: data.request_id,

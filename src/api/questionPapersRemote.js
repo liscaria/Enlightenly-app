@@ -6,6 +6,7 @@ import {
   QUESTION_PAPERS_BUCKET,
 } from "../supabaseClient.js";
 import { remoteUpsertClass } from "./materialsRemote.js";
+import { remoteDeleteQuestionBankByQuestionPaper } from "./questionBankRemote.js";
 
 function warn(scope, error) {
   if (!error) return;
@@ -53,10 +54,43 @@ function storagePathFor(ownerId, classId, paperId, name) {
   return `${ownerId}/${classId}/${paperId}-${safe}`;
 }
 
+/** Base question_papers row — omit solution columns unless a solution file was uploaded. */
+function questionPaperRowForUpsert(
+  userId,
+  record,
+  { storagePath = null, solutionStoragePath = null, solutionMimeType = null } = {}
+) {
+  const row = {
+    owner_id: userId,
+    id: record.id,
+    class_id: record.classId ?? record.class_id,
+    name: record.name,
+    paper_source: record.paperSource ?? record.paper_source ?? "Others",
+    year: Number(record.year) || new Date().getFullYear(),
+    file_type: record.fileType ?? record.file_type ?? null,
+    mime_type: record.mimeType ?? record.mime_type ?? null,
+    source_kind: record.source?.kind ?? record.source_kind ?? null,
+    source_origin: record.source?.origin ?? record.source_origin ?? null,
+    storage_bucket: storagePath ? QUESTION_PAPERS_BUCKET : null,
+    storage_path: storagePath,
+  };
+  if (solutionStoragePath) {
+    row.solution_storage_path = solutionStoragePath;
+    row.solution_mime_type = solutionMimeType ?? null;
+  }
+  return row;
+}
+
 /**
- * @returns {{ storagePath: string|null, error: string|null }}
+ * @returns {{ storagePath: string|null, solutionStoragePath: string|null, error: string|null }}
  */
-export async function remoteSaveQuestionPaper(ownerId, record, blob, catalog) {
+export async function remoteSaveQuestionPaper(
+  ownerId,
+  record,
+  blob,
+  catalog,
+  { solutionBlob = null, solutionName = null, solutionMimeType = null } = {}
+) {
   if (notReady(ownerId)) {
     return {
       storagePath: null,
@@ -75,6 +109,7 @@ export async function remoteSaveQuestionPaper(ownerId, record, blob, catalog) {
   }
 
   let storagePath = null;
+  let solutionStoragePath = null;
   let storageError = null;
 
   if (blob) {
@@ -98,6 +133,30 @@ export async function remoteSaveQuestionPaper(ownerId, record, blob, catalog) {
     }
   }
 
+  if (solutionBlob) {
+    const safeSolution = (solutionName || "solution")
+      .replace(/[^a-zA-Z0-9._-]+/g, "_")
+      .slice(0, 80);
+    solutionStoragePath = `${userId}/${record.classId}/${record.id}/solution-${safeSolution}`;
+    const solutionBody =
+      solutionBlob instanceof Blob
+        ? solutionBlob
+        : new Blob([solutionBlob], {
+            type: solutionMimeType || "application/octet-stream",
+          });
+    const { error: solutionUploadError } = await supabase.storage
+      .from(QUESTION_PAPERS_BUCKET)
+      .upload(solutionStoragePath, solutionBody, {
+        upsert: true,
+        contentType: solutionMimeType || solutionBody.type || "application/octet-stream",
+      });
+    if (solutionUploadError) {
+      warn("storage.uploadSolution", solutionUploadError);
+      if (!storageError) storageError = formatError(solutionUploadError);
+      solutionStoragePath = null;
+    }
+  }
+
   if (blob && !storagePath) {
     return {
       storagePath: null,
@@ -108,28 +167,64 @@ export async function remoteSaveQuestionPaper(ownerId, record, blob, catalog) {
   }
 
   const { error } = await supabase.from("question_papers").upsert(
-    {
-      owner_id: userId,
-      id: record.id,
-      class_id: record.classId,
-      name: record.name,
-      paper_source: record.paperSource,
-      year: Number(record.year),
-      file_type: record.fileType ?? null,
-      mime_type: record.mimeType ?? null,
-      source_kind: record.source?.kind ?? null,
-      source_origin: record.source?.origin ?? null,
-      storage_bucket: storagePath ? QUESTION_PAPERS_BUCKET : null,
-      storage_path: storagePath,
-    },
+    questionPaperRowForUpsert(userId, record, {
+      storagePath,
+      solutionStoragePath,
+      solutionMimeType,
+    }),
     { onConflict: "owner_id,id" }
   );
   if (error) warn("upsertQuestionPaper", error);
   const dbError = formatError(error);
   return {
     storagePath,
+    solutionStoragePath,
     error: dbError || storageError,
   };
+}
+
+/**
+ * Ensure question_papers row exists before writing question_bank rows (FK).
+ * Re-runs class sync and upserts metadata when storage succeeded but DB upsert failed.
+ */
+export async function remoteEnsureQuestionPaperRecord(ownerId, paper, catalog) {
+  if (notReady(ownerId)) {
+    return "Sign in to sync question papers to the database.";
+  }
+
+  const { userId, error: sessionError } = await resolveUploadUserId(ownerId);
+  if (sessionError) return sessionError;
+
+  const classId = paper.classId ?? paper.class_id;
+  if (!classId) return "Question paper is missing classId.";
+
+  if (Array.isArray(catalog)) {
+    const classErr = await ensureClass(userId, catalog, classId);
+    if (classErr) return classErr;
+  }
+
+  const { data: existing, error: fetchError } = await supabase
+    .from("question_papers")
+    .select("id")
+    .eq("owner_id", userId)
+    .eq("id", paper.id)
+    .maybeSingle();
+  if (fetchError) {
+    warn("ensureQuestionPaper.fetch", fetchError);
+    return formatError(fetchError);
+  }
+  if (existing) return null;
+
+  const storagePath = storagePathFor(userId, classId, paper.id, paper.name);
+  const { error } = await supabase.from("question_papers").upsert(
+    questionPaperRowForUpsert(userId, paper, { storagePath }),
+    { onConflict: "owner_id,id" }
+  );
+  if (error) {
+    warn("ensureQuestionPaper.upsert", error);
+    return formatError(error);
+  }
+  return null;
 }
 
 export async function remoteRenameQuestionPaper(ownerId, id, name) {
@@ -209,6 +304,10 @@ export async function remoteGetQuestionPaperSignedUrl(
 
 export async function remoteDeleteQuestionPaper(ownerId, id) {
   if (notReady(ownerId)) return null;
+
+  const bankErr = await remoteDeleteQuestionBankByQuestionPaper(ownerId, id);
+  if (bankErr) return bankErr;
+
   const { data, error: fetchError } = await supabase
     .from("question_papers")
     .select("storage_bucket, storage_path")
@@ -224,11 +323,18 @@ export async function remoteDeleteQuestionPaper(ownerId, id) {
     if (storageError) warn("storage.remove", storageError);
   }
 
+  if (!data) {
+    return null;
+  }
+
   const { error } = await supabase
     .from("question_papers")
     .delete()
     .eq("owner_id", ownerId)
     .eq("id", id);
-  if (error) warn("deleteQuestionPaper", error);
-  return formatError(error) || formatError(fetchError);
+  if (error) {
+    warn("deleteQuestionPaper", error);
+    return formatError(error);
+  }
+  return null;
 }

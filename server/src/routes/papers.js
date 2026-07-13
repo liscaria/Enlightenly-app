@@ -2,6 +2,7 @@ import { Router } from "express";
 import { createSupabaseForUser } from "../lib/supabase.js";
 import { log } from "../lib/logger.js";
 import { createExtractionJob, processPaperJob } from "../jobs/processPaperJob.js";
+import { reclassifyPaperJob } from "../jobs/reclassifyPaperJob.js";
 
 export const papersRouter = Router();
 
@@ -45,12 +46,45 @@ papersRouter.post("/:paperId/process", async (req, res) => {
       bankRowCount: result.bankRowCount ?? 0,
       assignedCount: result.assignedCount ?? 0,
       extractedBy: result.extractedBy,
+      extractionPath: result.extractionPath,
       classifiedBy: result.classifiedBy,
       qualityReport: result.qualityReport,
+      usageSummary: result.usageSummary,
     });
   } catch (err) {
     const message = err?.message || "Extraction job failed.";
     log("error", "papers.process.failed", { requestId, paperId, error: message });
+    return res.status(500).json({ error: message, requestId });
+  }
+});
+
+papersRouter.post("/:paperId/reclassify", async (req, res) => {
+  const paperId = req.params.paperId;
+  const ownerId = req.userId;
+  const requestId = req.requestId;
+  const onlyUnassigned = Boolean(req.body?.onlyUnassigned);
+
+  try {
+    const supabase = createSupabaseForUser(req.accessToken);
+
+    const result = await reclassifyPaperJob({
+      supabase,
+      ownerId,
+      paperId,
+      requestId,
+      onlyUnassigned,
+    });
+
+    return res.status(200).json({
+      status: result.status,
+      questionCount: result.questionCount,
+      assignedCount: result.assignedCount,
+      classifiedBy: result.classifiedBy,
+      usageSummary: result.usageSummary,
+    });
+  } catch (err) {
+    const message = err?.message || "Reclassify failed.";
+    log("error", "papers.reclassify.failed", { requestId, paperId, error: message });
     return res.status(500).json({ error: message, requestId });
   }
 });

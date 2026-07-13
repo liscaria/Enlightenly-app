@@ -1,4 +1,6 @@
 import { config } from "../lib/config.js";
+import { chatCompletion } from "../lib/openaiClient.js";
+import { OPENAI_ACTIONS } from "../lib/openaiUsageAccumulator.js";
 import { documentTextFromBlob } from "../extraction/questionExtraction.js";
 import { downloadMaterialBlob } from "../data/materialsRemote.js";
 
@@ -115,7 +117,7 @@ function classifyQuestionsHeuristic(questions, chapterIndex) {
 async function classifyBatchWithOpenAI(
   batch,
   chapterIndex,
-  { syllabusText = "", paperName = "" } = {}
+  { syllabusText = "", paperName = "", usageContext = null, accumulator = null, batchIndex = 0 } = {}
 ) {
   const chaptersPayload = chapterIndex.map((c) => ({
     id: c.id,
@@ -128,13 +130,8 @@ async function classifyBatchWithOpenAI(
     topic: q.topic ?? null,
   }));
 
-  const response = await fetch("https://api.openai.com/v1/chat/completions", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${config.openaiApiKey}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
+  const payload = await chatCompletion({
+    body: {
       model: config.openaiModel,
       temperature: 0.1,
       response_format: { type: "json_object" },
@@ -164,17 +161,14 @@ Questions:
 ${JSON.stringify(questionsPayload, null, 2)}`,
         },
       ],
-    }),
+    },
+    action: OPENAI_ACTIONS.CLASSIFY_LLM,
+    usageContext,
+    accumulator,
+    metadata: { batchIndex, questionCount: batch.length },
+    label: "Chapter LLM classification",
   });
 
-  if (!response.ok) {
-    const detail = await response.text();
-    throw new Error(
-      `Chapter classification failed (${response.status}): ${detail.slice(0, 200)}`
-    );
-  }
-
-  const payload = await response.json();
   const raw = payload?.choices?.[0]?.message?.content || "{}";
   let parsed;
   try {
@@ -223,7 +217,7 @@ function applyAssignments(questions, assignments, chapterIndex) {
 export async function classifyQuestionsToChapters(
   questions,
   chapterIndex,
-  { syllabusText = "", paperName = "" } = {}
+  { syllabusText = "", paperName = "", usageContext = null, accumulator = null } = {}
 ) {
   if (!questions.length || !chapterIndex.length) {
     return { questions, classifiedBy: "none" };
@@ -243,6 +237,9 @@ export async function classifyQuestionsToChapters(
       const assignments = await classifyBatchWithOpenAI(batch, chapterIndex, {
         syllabusText,
         paperName,
+        usageContext,
+        accumulator,
+        batchIndex: Math.floor(i / BATCH_SIZE),
       });
       allAssignments.push(...assignments);
     }

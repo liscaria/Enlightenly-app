@@ -6,6 +6,7 @@ import { requestLogger } from "./middleware/requestLogger.js";
 import { requireAuth } from "./middleware/auth.js";
 import { papersRouter } from "./routes/papers.js";
 import { jobsRouter } from "./routes/jobs.js";
+import { syllabusRouter } from "./routes/syllabus.js";
 
 assertServerConfig();
 
@@ -30,6 +31,7 @@ app.get("/health", (_req, res) => {
 
 app.use("/papers", requireAuth, papersRouter);
 app.use("/jobs", requireAuth, jobsRouter);
+app.use("/syllabus", requireAuth, syllabusRouter);
 
 app.use((err, req, res, _next) => {
   log("error", "unhandled", {

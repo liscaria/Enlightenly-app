@@ -1,10 +1,15 @@
 // Question bank: one Postgres row per question, from chapter materials or exam papers.
 
-import { supabase, isSupabaseConfigured } from "../supabaseClient.js";
+import { normalizeDifficultyLevel, DIFFICULTY_LEVELS } from "../constants/difficultyLevels.js";
+import {
+  metadataForQuestionBank,
+  sanitizeQuestionBankText,
+} from "./postgresJsonSanitize.js";
 import {
   sourceFromMaterialExamSource,
   sourceFromQuestionPaper,
 } from "../constants/questionSources.js";
+import { supabase, isSupabaseConfigured } from "../supabaseClient.js";
 
 function warn(scope, error) {
   if (!error) return;
@@ -40,17 +45,19 @@ export function questionBankRowsFromMaterial(
     unit_id: material.unitId ?? material.unit_id,
     chapter_id: material.chapterId ?? material.chapter_id,
     chapter_name: chapterName ?? material.chapterName ?? null,
+    chapter_confidence: q.chapterConfidence ?? q.chapter_confidence ?? 100,
     question_no: q.questionNo ?? q.question_no ?? index + 1,
-    question_text: q.questionText ?? q.question_text ?? "",
+    question_text: sanitizeQuestionBankText(q.questionText ?? q.question_text ?? ""),
     marks: q.marks ?? null,
-    solution: q.solution ?? null,
+    solution: q.solution ? sanitizeQuestionBankText(q.solution) : null,
+    difficulty_level: normalizeDifficultyLevel(q.difficultyLevel ?? q.difficulty_level),
     source: sourceFromMaterialExamSource(
       material.examSource ?? material.exam_source
     ),
     year: null,
-    topic: q.topic ?? null,
+    topic: q.topic ? sanitizeQuestionBankText(q.topic) : null,
     extracted_by: q.extractedBy ?? q.extracted_by ?? "manual",
-    metadata: q.metadata ?? {},
+    metadata: metadataForQuestionBank(q.metadata ?? {}),
   }));
 }
 
@@ -73,23 +80,34 @@ export function questionBankRowsFromQuestionPaper(
     unit_id: q.unitId ?? q.unit_id ?? null,
     chapter_id: q.chapterId ?? q.chapter_id ?? null,
     chapter_name: q.chapterName ?? q.chapter_name ?? null,
+    chapter_confidence: q.chapterConfidence ?? q.chapter_confidence ?? null,
     question_no: q.questionNo ?? q.question_no ?? index + 1,
-    question_text: q.questionText ?? q.question_text ?? "",
+    question_text: sanitizeQuestionBankText(q.questionText ?? q.question_text ?? ""),
     marks: q.marks ?? null,
-    solution: q.solution ?? null,
+    solution: q.solution ? sanitizeQuestionBankText(q.solution) : null,
+    difficulty_level: normalizeDifficultyLevel(q.difficultyLevel ?? q.difficulty_level),
     source: sourceFromQuestionPaper(paper.paperSource ?? paper.paper_source),
     year: paper.year ?? null,
-    topic: q.topic ?? null,
+    topic: q.topic ? sanitizeQuestionBankText(q.topic) : null,
     extracted_by: q.extractedBy ?? q.extracted_by ?? "manual",
-    metadata: q.metadata ?? {},
+    metadata: metadataForQuestionBank(q.metadata ?? {}),
   }));
 }
 
 const UPSERT_BATCH_SIZE = 40;
 
-export async function remoteUpsertQuestionBank(ownerId, records) {
-  if (notReady(ownerId) || !records?.length) return null;
-  const rows = records.map((r) => ({
+function isMissingDifficultyColumnError(error) {
+  const msg = (error?.message || "").toLowerCase();
+  return msg.includes("difficulty_level") && msg.includes("column");
+}
+
+function isMissingChapterConfidenceColumnError(error) {
+  const msg = (error?.message || "").toLowerCase();
+  return msg.includes("chapter_confidence") && msg.includes("column");
+}
+
+function buildUpsertRow(ownerId, r, { includeDifficulty = true, includeChapterConfidence = true } = {}) {
+  const row = {
     owner_id: ownerId,
     ...(r.id ? { id: r.id } : {}),
     origin_type: r.origin_type,
@@ -98,23 +116,67 @@ export async function remoteUpsertQuestionBank(ownerId, records) {
     class_id: r.class_id,
     unit_id: r.unit_id ?? null,
     chapter_id: r.chapter_id ?? null,
-    chapter_name: r.chapter_name ?? null,
+    chapter_name: r.chapter_name ? sanitizeQuestionBankText(r.chapter_name) : null,
     question_no: r.question_no ?? null,
-    question_text: r.question_text,
+    question_text: sanitizeQuestionBankText(r.question_text),
     marks: r.marks ?? null,
-    solution: r.solution ?? null,
+    solution: r.solution ? sanitizeQuestionBankText(r.solution) : null,
     source: r.source,
     year: r.year ?? null,
-    topic: r.topic ?? null,
+    topic: r.topic ? sanitizeQuestionBankText(r.topic) : null,
     extracted_by: r.extracted_by || "manual",
-    metadata: r.metadata || {},
-  }));
+    metadata: metadataForQuestionBank(r.metadata || {}),
+  };
+  if (includeChapterConfidence) {
+    row.chapter_confidence =
+      r.chapter_confidence != null ? Number(r.chapter_confidence) : null;
+  }
+  if (includeDifficulty) {
+    row.difficulty_level = normalizeDifficultyLevel(r.difficulty_level);
+  }
+  return row;
+}
 
-  for (let i = 0; i < rows.length; i += UPSERT_BATCH_SIZE) {
-    const batch = rows.slice(i, i + UPSERT_BATCH_SIZE);
-    const { error } = await supabase
-      .from("question_bank")
-      .upsert(batch, { onConflict: "id" });
+async function upsertBatch(
+  ownerId,
+  batch,
+  { includeDifficulty = true, includeChapterConfidence = true } = {}
+) {
+  const rows = batch.map((r) =>
+    buildUpsertRow(ownerId, r, { includeDifficulty, includeChapterConfidence })
+  );
+  const { error } = await supabase.from("question_bank").upsert(rows, { onConflict: "id" });
+  return error;
+}
+
+export async function remoteUpsertQuestionBank(ownerId, records) {
+  if (notReady(ownerId) || !records?.length) return null;
+
+  for (let i = 0; i < records.length; i += UPSERT_BATCH_SIZE) {
+    const batch = records.slice(i, i + UPSERT_BATCH_SIZE);
+    let includeChapterConfidence = true;
+    let includeDifficulty = true;
+    let error = await upsertBatch(ownerId, batch, {
+      includeDifficulty,
+      includeChapterConfidence,
+    });
+
+    if (error && isMissingDifficultyColumnError(error)) {
+      includeDifficulty = false;
+      error = await upsertBatch(ownerId, batch, {
+        includeDifficulty,
+        includeChapterConfidence,
+      });
+    }
+
+    if (error && isMissingChapterConfidenceColumnError(error)) {
+      includeChapterConfidence = false;
+      error = await upsertBatch(ownerId, batch, {
+        includeDifficulty,
+        includeChapterConfidence,
+      });
+    }
+
     if (error) {
       warn("upsertQuestionBank", error);
       return formatError(error);
@@ -139,9 +201,14 @@ export async function remoteReplaceQuestionBankForMaterial(
 export async function remoteReplaceQuestionBankForQuestionPaper(
   ownerId,
   paper,
-  context
+  context,
+  { catalog = null, ensureQuestionPaperRecord = null } = {}
 ) {
   if (notReady(ownerId)) return null;
+  if (ensureQuestionPaperRecord) {
+    const ensureErr = await ensureQuestionPaperRecord(ownerId, paper, catalog);
+    if (ensureErr) return ensureErr;
+  }
   const deleteError = await remoteDeleteQuestionBankByQuestionPaper(ownerId, paper.id);
   if (deleteError) return deleteError;
   const rows = questionBankRowsFromQuestionPaper(ownerId, paper, context);
@@ -204,4 +271,21 @@ export async function remoteQueryQuestionBank(ownerId, filters = {}) {
     return [];
   }
   return data || [];
+}
+
+export async function remoteUpdateQuestionDifficulty(ownerId, questionId, difficultyLevel) {
+  if (notReady(ownerId)) return "Not signed in.";
+  if (!DIFFICULTY_LEVELS.includes(difficultyLevel)) {
+    return "Invalid difficulty level.";
+  }
+  const { error } = await supabase
+    .from("question_bank")
+    .update({ difficulty_level: difficultyLevel })
+    .eq("owner_id", ownerId)
+    .eq("id", questionId);
+  if (error) {
+    warn("updateQuestionDifficulty", error);
+    return formatError(error);
+  }
+  return null;
 }
